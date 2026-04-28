@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipeline Design — World Model Termination SPA</title>
+<style>
+  :root {
+    --bg: #0c0d11;
+    --surface: #13141a;
+    --surface2: #1a1c25;
+    --border: #252730;
+    --text: #e2e4ed;
+    --text-muted: #6b7280;
+    --text-dim: #9ca3af;
+
+    --datagen-rand: #3b82f6;     /* blue — random play */
+    --datagen-llm: #f97316;       /* orange — LLM policy */
+    --sft: #10b981;               /* green — SFT */
+    --rl: #8b5cf6;                /* purple — RL */
+    --eval: #facc15;              /* yellow — eval */
+    --baseline: #ef4444;          /* red — baselines */
+    --oracle: #14b8a6;            /* teal — env / oracle */
+    --decision: #ec4899;          /* pink — decisions */
+    --output: #6b7280;            /* gray — terminal nodes */
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  header {
+    padding: 24px 32px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.02em; }
+  header p { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  .tabs {
+    display: flex;
+    gap: 4px;
+    padding: 12px 32px 0;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  .tab {
+    padding: 8px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+    transition: all .15s;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--text); border-bottom-color: var(--text); }
+
+  .legend {
+    padding: 10px 32px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+
+  .main {
+    display: flex;
+    height: calc(100vh - 130px);
+    overflow: hidden;
+  }
+  .canvas {
+    flex: 1;
+    overflow: auto;
+    padding: 32px;
+  }
+
+  .panel {
+    width: 360px;
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+    overflow-y: auto;
+  }
+  .panel-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+    z-index: 1;
+  }
+  .panel-header h3 { font-size: 13px; font-weight: 600; }
+  .panel-close { cursor: pointer; color: var(--text-muted); font-size: 16px; user-select: none; }
+  .panel-body { padding: 16px; font-size: 12px; line-height: 1.65; color: var(--text-dim); }
+  .panel-body h4 { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); margin: 14px 0 6px; }
+  .panel-body h4:first-child { margin-top: 0; }
+  .panel-body p { margin-bottom: 8px; }
+  .panel-body ul { padding-left: 16px; margin-bottom: 8px; }
+  .panel-body ul li { margin-bottom: 4px; }
+  .panel-body code {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    background: var(--surface2);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: var(--text);
+  }
+  .panel-body pre {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    padding: 10px;
+    border-radius: 5px;
+    margin: 8px 0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    overflow-x: auto;
+    line-height: 1.5;
+  }
+  .panel-body strong { color: var(--text); }
+  .panel-body .hint {
+    background: rgba(20,184,166,.06);
+    border-left: 2px solid var(--oracle);
+    padding: 8px 10px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin: 8px 0;
+  }
+  .panel-body .warn {
+    background: rgba(239,68,68,.06);
+    border-left: 2px solid var(--baseline);
+    padding: 8px 10px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin: 8px 0;
+  }
+
+  /* Nodes */
+  .flow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+  }
+  .node {
+    cursor: pointer;
+    border-radius: 8px;
+    padding: 12px 18px;
+    font-size: 12px;
+    font-weight: 500;
+    text-align: center;
+    border: 1px solid transparent;
+    transition: all .15s;
+    position: relative;
+    user-select: none;
+  }
+  .node:hover { filter: brightness(1.2); transform: translateY(-1px); }
+  .node.active { box-shadow: 0 0 0 2px currentColor; filter: brightness(1.15); }
+  .node .node-meta { font-size: 10px; opacity: .7; margin-top: 4px; font-weight: 400; }
+
+  .node-start { background: #1f2130; border-color: var(--border); color: var(--text); min-width: 220px; }
+  .node-output {
+    background: rgba(107,114,128,.1); border-color: rgba(107,114,128,.3);
+    color: var(--text); border-radius: 18px; min-width: 220px;
+  }
+  .node-datagen-rand {
+    background: rgba(59,130,246,.1); border-color: rgba(59,130,246,.35); color: var(--datagen-rand);
+  }
+  .node-datagen-llm {
+    background: rgba(249,115,22,.1); border-color: rgba(249,115,22,.35); color: var(--datagen-llm);
+  }
+  .node-sft {
+    background: rgba(16,185,129,.1); border-color: rgba(16,185,129,.35); color: var(--sft);
+  }
+  .node-rl {
+    background: rgba(139,92,246,.1); border-color: rgba(139,92,246,.35); color: var(--rl);
+  }
+  .node-eval {
+    background: rgba(250,204,21,.1); border-color: rgba(250,204,21,.35); color: var(--eval);
+  }
+  .node-baseline {
+    background: rgba(239,68,68,.08); border-color: rgba(239,68,68,.3); color: var(--baseline);
+  }
+  .node-oracle {
+    background: rgba(20,184,166,.08); border-color: rgba(20,184,166,.3); color: var(--oracle);
+  }
+  .node-decision {
+    background: rgba(236,72,153,.08); border-color: rgba(236,72,153,.3); color: var(--decision);
+    clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+    padding: 14px 28px;
+    font-weight: 700;
+  }
+
+  .arrow {
+    width: 1px;
+    height: 26px;
+    background: linear-gradient(to bottom, var(--border), var(--border));
+    margin: 0 auto;
+    position: relative;
+  }
+  .arrow::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 50%;
+    transform: translateX(-50%);
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid var(--border);
+  }
+  .arrow-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-align: center;
+    margin: -2px 0 6px;
+    letter-spacing: 0.04em;
+  }
+
+  .branches { display: flex; gap: 32px; align-items: flex-start; }
+  .branch { display: flex; flex-direction: column; align-items: center; gap: 0; flex: 1; min-width: 240px; }
+  .branch-label {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 4px 10px; border-radius: 4px; margin-bottom: 10px;
+  }
+  .branch-label.rand { background: rgba(59,130,246,.12); color: var(--datagen-rand); border: 1px solid rgba(59,130,246,.35); }
+  .branch-label.llm { background: rgba(249,115,22,.12); color: var(--datagen-llm); border: 1px solid rgba(249,115,22,.35); }
+
+  .merge-bar {
+    height: 1px;
+    width: calc(100% - 80px);
+    background: var(--border);
+    margin: 14px auto 0;
+  }
+
+  /* Stage box */
+  .stage-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 12px;
+  }
+  .stage-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .stage-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .stage-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--surface2);
+    padding: 4px 10px;
+    border-radius: 4px;
+  }
+
+  /* Format flow cards */
+  .format-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 14px;
+    max-width: 1200px;
+  }
+  @media (max-width: 1100px) {
+    .format-grid { grid-template-columns: 1fr; }
+  }
+  .format-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .format-card.A { border-color: rgba(249,115,22,.3); }
+  .format-card.B { border-color: rgba(16,185,129,.3); }
+  .format-card.C { border-color: rgba(236,72,153,.3); }
+  .format-title {
+    font-size: 12px; font-weight: 700; margin-bottom: 8px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .format-card.A .format-title { color: var(--datagen-llm); }
+  .format-card.B .format-title { color: var(--sft); }
+  .format-card.C .format-title { color: var(--decision); }
+  .format-card pre {
+    background: var(--surface2);
+    border-radius: 5px;
+    padding: 10px;
+    font-size: 10px;
+    overflow-x: auto;
+    color: var(--text);
+    margin: 8px 0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    line-height: 1.5;
+  }
+  .format-card .label-locked, .format-card .label-open {
+    display: inline-block; font-size: 9px; font-weight: 700;
+    padding: 2px 6px; border-radius: 3px; letter-spacing: 0.06em;
+  }
+  .format-card .label-locked { background: rgba(16,185,129,.15); color: var(--sft); }
+  .format-card .label-open { background: rgba(236,72,153,.15); color: var(--decision); }
+
+  /* Eval matrix */
+  .eval-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 12px;
+  }
+  .eval-table th, .eval-table td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+  }
+  .eval-table th {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .eval-table td:first-child { font-weight: 600; }
+  .eval-table tr.headline td { background: rgba(16,185,129,.05); }
+  .eval-table tr.baseline td { color: var(--text-dim); }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .tab-content { display: none; }
+  .tab-content.active { display: flex; height: calc(100vh - 170px); }
+
+  .small { font-size: 10px; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+  .badge-todo { background: rgba(250,204,21,.12); color: var(--eval); border: 1px solid rgba(250,204,21,.3); }
+  .badge-done { background: rgba(16,185,129,.12); color: var(--sft); border: 1px solid rgba(16,185,129,.3); }
+  .badge-running { background: rgba(249,115,22,.12); color: var(--datagen-llm); border: 1px solid rgba(249,115,22,.3); }
+</style>
+</head>
+
+<body>
+
+<header>
+  <h1>Pipeline Design — World Model Termination SPA</h1>
+  <p>Sudoku · Qwen2.5-1.5B-Instruct · Single-GPU GRPO · See <code>doc/SPEC.md</code> for research scope · Click any node for details</p>
+</header>
+
+<div class="tabs">
+  <div class="tab active" onclick="showTab('overview')">Pipeline Overview</div>
+  <div class="tab" onclick="showTab('formats')">Format Flows</div>
+  <div class="tab" onclick="showTab('eval')">Eval &amp; Baselines</div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><span class="dot" style="background:var(--datagen-rand);"></span>Random-play data</div>
+  <div class="legend-item"><span class="dot" style="background:var(--datagen-llm);"></span>LLM-policy data</div>
+  <div class="legend-item"><span class="dot" style="background:var(--sft);"></span>SFT</div>
+  <div class="legend-item"><span class="dot" style="background:var(--rl);"></span>RL</div>
+  <div class="legend-item"><span class="dot" style="background:var(--eval);"></span>Eval</div>
+  <div class="legend-item"><span class="dot" style="background:var(--baseline);"></span>Baselines (SPA)</div>
+  <div class="legend-item"><span class="dot" style="background:var(--oracle);"></span>Env / Oracle</div>
+  <div class="legend-item"><span class="dot" style="background:var(--decision);"></span>Decision / Open</div>
+</div>
+
+<div class="main">
+
+<!-- ════════════════════════════════════════ TAB: OVERVIEW -->
+<div class="tab-content active" id="tab-overview">
+  <div class="canvas">
+    <div class="flow">
+
+      <!-- Entry: env + oracle -->
+      <div class="node node-oracle" onclick="showPanel('env')" style="min-width:300px;">
+        🎲 SudokuEnv + SudokuSolvabilityChecker
+        <div class="node-meta">9×9 grid · 40% cells removed · constraint propagation oracle</div>
+      </div>
+      <div class="arrow"></div>
+      <div class="arrow-label">used by both data tracks AND live RL sampler</div>
+
+      <!-- Two parallel data-gen tracks -->
+      <div class="branches" style="width:760px;">
+
+        <!-- Track A: random -->
+        <div class="branch">
+          <div class="branch-label rand">Track A · CPU</div>
+          <div class="node node-datagen-rand" style="width:100%;" onclick="showPanel('trackA')">
+            Random-play multi-turn
+            <div class="node-meta">scripts/regen_random_multiturn.py</div>
+          </div>
+          <div class="arrow"></div>
+          <div class="node node-output" style="width:100%;" onclick="showPanel('data-rand')">
+            data/sudoku_multiturn/
+            <div class="node-meta">~32k samples · ~1 min · 6.3% solvable, 4.3% BP</div>
+          </div>
+        </div>
+
+        <!-- Track B: LLM-policy -->
+        <div class="branch">
+          <div class="branch-label llm">Track B · H800</div>
+          <div class="node node-datagen-llm" style="width:100%;" onclick="showPanel('trackB')">
+            LLM-policy multi-turn
+            <div class="node-meta">scripts/generate_llm_policy_data_gpu.sh</div>
+          </div>
+          <div class="arrow"></div>
+          <div class="node node-output" style="width:100%;" onclick="showPanel('data-llm')">
+            data/sudoku_llm_policy/
+            <div class="node-meta">~30k samples · ~30–60 min (with minimal prompt)</div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="merge-bar"></div>
+      <div class="arrow"></div>
+      <div class="arrow-label">parquet → SFT trainer (each path produces a checkpoint)</div>
+
+      <!-- SFT -->
+      <div class="branches" style="width:760px;">
+        <div class="branch">
+          <div class="node node-sft" style="width:100%;" onclick="showPanel('sft-rand')">
+            SFT (warm-start / ablation)
+            <div class="node-meta">simple_sft_trainer.py · trained on data/sudoku_multiturn</div>
+          </div>
+          <div class="arrow"></div>
+          <div class="node node-output" style="width:100%;">
+            outputs/sft_sudoku/
+            <div class="node-meta">~3 GB checkpoint · ablation only</div>
+          </div>
+        </div>
+
+        <div class="branch">
+          <div class="node node-sft" style="width:100%;" onclick="showPanel('sft-llm')">
+            SFT (headline)
+            <div class="node-meta">simple_sft_trainer.py · trained on data/sudoku_llm_policy</div>
+          </div>
+          <div class="arrow"></div>
+          <div class="node node-output" style="width:100%;">
+            outputs/sft_sudoku_llm_policy/
+            <div class="node-meta">~3 GB checkpoint · used downstream</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="merge-bar"></div>
+      <div class="arrow"></div>
+      <div class="arrow-label">headline checkpoint → RL warm-start</div>
+
+      <!-- RL -->
+      <div class="node node-rl" style="min-width:520px;" onclick="showPanel('rl')">
+        🎯 Stage 3 — RL (LiveEnvTerminationRLTrainer)
+        <div class="node-meta">rl_trainer.py + rl_sudoku.yaml · GRPO · live env · reward v2</div>
+      </div>
+      <div class="arrow"></div>
+
+      <!-- Reward components -->
+      <div class="node node-decision" onclick="showPanel('reward')" style="min-width:200px;">
+        ◆ Reward v2
+        <div class="node-meta" style="margin-top:6px;">asymmetric BP · format compliance</div>
+      </div>
+      <div class="arrow"></div>
+
+      <div class="node node-output" style="min-width:220px;">
+        outputs/rl_sudoku/
+        <div class="node-meta">final headline model</div>
+      </div>
+
+      <div class="arrow"></div>
+      <div class="arrow-label">all checkpoints → eval</div>
+
+      <!-- Eval -->
+      <div class="node node-eval" style="min-width:520px;" onclick="showPanel('eval')">
+        📊 Stage 4 — Evaluation
+        <div class="node-meta">evaluate_rl.py · balanced live-env eval · termination + Pass@k metrics</div>
+      </div>
+      <div class="arrow"></div>
+
+      <!-- Eval baselines -->
+      <div class="branches" style="width:900px; gap:14px;">
+        <div class="branch">
+          <div class="node node-baseline" style="width:100%;" onclick="showPanel('baseline-vanilla')">
+            Vanilla RL <span class="badge badge-todo">TODO</span>
+            <div class="node-meta">SPA Table 2 — no SFT cold-start</div>
+          </div>
+        </div>
+        <div class="branch">
+          <div class="node node-baseline" style="width:100%;" onclick="showPanel('baseline-se')">
+            State-Estimation RL <span class="badge badge-todo">TODO</span>
+            <div class="node-meta">SPA Table 2 — SFT, no &lt;prediction&gt;</div>
+          </div>
+        </div>
+        <div class="branch">
+          <div class="node node-baseline" style="width:100%;" onclick="showPanel('baseline-vagen')">
+            VAGEN <span class="badge badge-todo">TODO</span>
+            <div class="node-meta">SPA Table 2 — online world modeling</div>
+          </div>
+        </div>
+        <div class="branch">
+          <div class="node node-baseline" style="width:100%;" onclick="showPanel('baseline-heuristic')">
+            Heuristic <span class="badge badge-done">DONE</span>
+            <div class="node-meta">sudoku_baseline.py — constraint propagation</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow" style="margin-top:14px;"></div>
+
+      <div class="node node-output" style="min-width:520px;">
+        doc/eval_&lt;date&gt;_&lt;topic&gt;.md
+        <div class="node-meta">Pass@1, Pass@8, BP recall/precision/F1, solvability F1</div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="panel" id="panel-overview">
+    <div class="panel-header"><h3 id="panel-title-overview">Click a node for details</h3>
+      <span class="panel-close" onclick="closePanel('overview')">×</span>
+    </div>
+    <div class="panel-body" id="panel-body-overview">
+      <p>This pipeline goes from a raw Sudoku environment all the way to a trained termination predictor that beats SPA baselines.</p>
+      <h4>Stages at a glance</h4>
+      <ul>
+        <li><strong>Stage 1</strong> — Data generation (two tracks: random-play CPU + LLM-policy GPU)</li>
+        <li><strong>Stage 2</strong> — Supervised finetuning (SFT) — produces world-model + termination tags</li>
+        <li><strong>Stage 3</strong> — Reinforcement learning (RL) — lifts BP recall via asymmetric reward</li>
+        <li><strong>Stage 4</strong> — Evaluation — vs SPA baselines + heuristic</li>
+      </ul>
+      <h4>Why two data tracks?</h4>
+      <p>Track A is a fast CPU-only intermediate that lets us debug the full pipeline before spending GPU hours on Track B. Track B is the headline data — it matches SPA's self-play recipe and produces in-distribution training samples.</p>
+      <h4>What we contribute on top of SPA</h4>
+      <p>The termination tags <code>&lt;solvable&gt;</code>, <code>&lt;breaking_point&gt;</code>, <code>&lt;steps_left&gt;</code> are layered onto SPA's existing <code>&lt;observation&gt;</code> + <code>&lt;prediction&gt;</code> training shape. Same self-play pipeline, extended target.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════ TAB: FORMATS -->
+<div class="tab-content" id="tab-formats">
+  <div class="canvas">
+    <div style="max-width:1200px;">
+      <p style="color:var(--text-dim);margin-bottom:16px;">There are <strong>three distinct format flows</strong> in this pipeline. They <em>must not be conflated</em> — each has different strictness requirements. See <code>doc/SPEC.md §7.5</code> for the locked decisions.</p>
+
+      <div class="format-grid">
+
+        <!-- A -->
+        <div class="format-card A">
+          <div class="format-title">A · LLM data-gen output <span class="label-locked">LOCKED</span></div>
+          <p style="color:var(--text-dim);">Only <code>&lt;answer&gt;</code> is required to be parseable. Everything else is forgiving.</p>
+          <pre>System prompt (data gen, minimal):
+
+You are playing Sudoku on a 9x9 grid. ...
+Output your move EXACTLY in this format:
+&lt;answer&gt;place N at row R col C&lt;/answer&gt;
+Output ONLY the &lt;answer&gt;...&lt;/answer&gt; tag.</pre>
+          <p style="color:var(--text-dim);">Why minimal: the base Qwen2.5-1.5B has never seen our format. Asking for 6 tags drops parse rate to ~30–50% and slows decode 10–20×. Asking for only <code>&lt;answer&gt;</code> gives &gt;90% parse rate.</p>
+          <div class="hint">Track quality: <code>parse_failure_rate</code> per trajectory in the per-attempt log. Threshold: &gt;30% = data is effectively random-play.</div>
+        </div>
+
+        <!-- B -->
+        <div class="format-card B">
+          <div class="format-title">B · SFT target row <span class="label-locked">LOCKED</span></div>
+          <p style="color:var(--text-dim);">All designed tags, content from <strong>env ground truth</strong>, not LLM hallucinations. Mirrors SPA §2.2.</p>
+          <pre>&lt;think&gt;
+&lt;observation&gt;{step.state}&lt;/observation&gt;       ← env
+&lt;prediction&gt;{step.next_state}&lt;/prediction&gt;     ← env
+&lt;terminate_prob&gt;0.10&lt;/terminate_prob&gt;
+&lt;steps_left&gt;{bucket}&lt;/steps_left&gt;               ← oracle
+&lt;solvable&gt;true&lt;/solvable&gt;                       ← oracle
+&lt;breaking_point&gt;false&lt;/breaking_point&gt;          ← oracle
+&lt;/think&gt;
+&lt;answer&gt;{step.action_name}&lt;/answer&gt;</pre>
+          <p style="color:var(--text-dim);">Built by <code>SFTFormatter.format_step()</code> for <strong>every</strong> training row, regardless of what the LLM produced. SPA's recipe: replace beliefs with ground truth.</p>
+          <div class="warn"><strong>Anti-goal:</strong> changing this tag set or order without re-running all baselines. The XML <em>is</em> the API between SFT, RL, and eval.</div>
+        </div>
+
+        <!-- C -->
+        <div class="format-card C">
+          <div class="format-title">C · Multi-turn prior turns <span class="label-open">OPEN</span></div>
+          <p style="color:var(--text-dim);">When the prompt at step K includes prior assistant turns from steps 0…K−1, what content do we use?</p>
+          <pre>// Two valid policies:
+
+[1] LLM-raw (current with full prompt)
+    prior = step.llm_raw_response  (may be malformed)
+    → matches inference distribution
+    → realistic noise in priors
+
+[2] Template-clean (current with minimal prompt)
+    prior = SFTFormatter.format_step(step)
+    → consistent prior + target shape
+    → cleaner training signal</pre>
+          <p style="color:var(--text-dim);">With the minimal data-gen prompt, <code>llm_raw_response</code> is set to <code>None</code> on the trajectory step. <code>SFTFormatter</code> then falls back to the template (policy [2]). This is the current behavior.</p>
+          <div class="hint">Decision is <strong>open</strong>. If we ever switch back to the full data-gen prompt, the policy flips to [1] and we'd want to track <code>parse_failure_rate</code> as the data-quality signal.</div>
+        </div>
+
+      </div>
+
+      <div style="margin-top:24px;max-width:1200px;">
+        <h4 style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);margin-bottom:10px;">How they connect</h4>
+        <div class="stage-box">
+          <p style="color:var(--text-dim);">During data gen, the LLM produces (A). The resulting <strong>action</strong> is parsed and fed to the env. The env returns ground-truth state + labels. The training row is then constructed as (B), with priors as (C). The LLM's actual XML output (other than the action) is essentially discarded for training purposes — its job is to produce diverse, in-distribution <em>actions</em>, not to write the training format.</p>
+          <p style="color:var(--text-dim);margin-top:10px;">This separation is what makes "minimal data-gen prompt + full SFT target" a valid optimization: we get cheap, fast, high-quality data gen AND the full training signal at the SFT step.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════ TAB: EVAL -->
+<div class="tab-content" id="tab-eval">
+  <div class="canvas">
+    <div style="max-width:1200px;">
+
+      <p style="color:var(--text-dim);margin-bottom:16px;">Per <code>doc/SPEC.md §3</code>, the headline result must compare against SPA's baseline set on Sudoku, with both Pass@k metrics (for SPA comparability) and termination metrics (our contribution).</p>
+
+      <h4 style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);margin-bottom:10px;">Metrics</h4>
+      <div class="stage-box">
+        <ul style="padding-left:18px;color:var(--text-dim);">
+          <li><strong style="color:var(--text);">Pass@1, Pass@8</strong> — fraction of puzzles solved in the highest-probability rollout / any of K rollouts. From SPA Table 2. <span class="badge badge-todo">TODO</span></li>
+          <li><strong style="color:var(--text);">Solvability F1</strong> — F1 on per-state <code>&lt;solvable&gt;</code> prediction over balanced eval set. <span class="badge badge-done">DONE</span></li>
+          <li><strong style="color:var(--text);">BP recall / precision / F1</strong> — performance on per-state <code>&lt;breaking_point&gt;</code> prediction. The headline termination metric. <span class="badge badge-done">DONE</span></li>
+          <li><strong style="color:var(--text);">Per-deadlock-type recall</strong> — recall stratified by zero_candidates / constraint_propagation / no_solution. Diagnostic. <span class="badge badge-done">DONE</span></li>
+        </ul>
+      </div>
+
+      <h4 style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);margin:18px 0 10px;">Comparison matrix (post-RL)</h4>
+      <table class="eval-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Pass@1</th>
+            <th>Pass@8</th>
+            <th>Solvability F1</th>
+            <th>BP recall</th>
+            <th>BP precision</th>
+            <th>BP F1</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="baseline">
+            <td>Heuristic (sudoku_baseline.py)</td>
+            <td>n/a</td><td>n/a</td><td>low</td><td>low</td><td>high</td><td>low</td>
+            <td><span class="badge badge-done">DONE</span></td>
+          </tr>
+          <tr class="baseline">
+            <td>Vanilla RL (no SFT, no world model)</td>
+            <td>SPA Table 2</td><td>SPA Table 2</td><td>—</td><td>—</td><td>—</td><td>—</td>
+            <td><span class="badge badge-todo">TODO</span></td>
+          </tr>
+          <tr class="baseline">
+            <td>State-Estimation RL (no &lt;prediction&gt;)</td>
+            <td>SPA Table 2</td><td>SPA Table 2</td><td>—</td><td>—</td><td>—</td><td>—</td>
+            <td><span class="badge badge-todo">TODO</span></td>
+          </tr>
+          <tr class="baseline">
+            <td>VAGEN (online world modeling)</td>
+            <td>SPA Table 2</td><td>SPA Table 2</td><td>—</td><td>—</td><td>—</td><td>—</td>
+            <td><span class="badge badge-todo">TODO</span></td>
+          </tr>
+          <tr>
+            <td>Random-play SFT (ablation)</td>
+            <td>preserve</td><td>—</td><td>mid</td><td>mid (early-game biased)</td><td>low</td><td>low–mid</td>
+            <td><span class="badge badge-todo">TODO</span></td>
+          </tr>
+          <tr>
+            <td>LLM-policy SFT (pre-RL headline)</td>
+            <td>preserve</td><td>—</td><td>mid–high</td><td>mid</td><td>mid</td><td>mid</td>
+            <td><span class="badge badge-running">RUNNING</span></td>
+          </tr>
+          <tr class="headline">
+            <td><strong>LLM-policy SFT + RL (final headline)</strong></td>
+            <td><strong>match/beat SPA</strong></td>
+            <td><strong>match/beat SPA</strong></td>
+            <td>high</td>
+            <td>high</td>
+            <td>mid</td>
+            <td>mid–high</td>
+            <td><span class="badge badge-todo">TODO</span></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h4 style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);margin:18px 0 10px;">Reward v2 — what RL optimizes</h4>
+      <table class="eval-table">
+        <thead><tr><th>Component</th><th>Value</th><th>Rationale</th></tr></thead>
+        <tbody>
+          <tr><td>BP true positive</td><td>+3.0</td><td>Catching deadlocks is the high-value signal</td></tr>
+          <tr><td>BP false negative</td><td>−2.0</td><td>Missing a deadlock is costly</td></tr>
+          <tr><td>BP false positive</td><td>−0.5</td><td>Mild penalty; allow over-prediction slightly</td></tr>
+          <tr><td>Solvable correct</td><td>+0.5</td><td>Standard reward</td></tr>
+          <tr><td>Solvable wrong</td><td>−0.25</td><td>Standard penalty</td></tr>
+          <tr><td>Format compliance per tag</td><td>+0.1</td><td>Prevents tag-format degradation</td></tr>
+          <tr class="baseline"><td>steps_left</td><td>0 (excluded)</td><td>Trajectory-dependent; SFT-only signal</td></tr>
+        </tbody>
+      </table>
+
+    </div>
+  </div>
+</div>
+
+</div><!-- /main -->
+
+<script>
+const panelData = {
+  'env': {
+    title: 'SudokuEnv + SudokuSolvabilityChecker',
+    body: `
+      <h4>What it is</h4>
+      <p>The 9×9 Sudoku environment with built-in solvability oracle. The env <em>and</em> the oracle are required for everything downstream — there is no project without a ground-truth check.</p>
+      <h4>Implementation</h4>
+      <ul>
+        <li><code>src/environments/sudoku.py</code> — env (reset/step/check_solvability)</li>
+        <li><code>src/environments/sudoku_utils.py</code> — <code>SudokuSolvabilityChecker</code></li>
+      </ul>
+      <h4>How solvability is checked</h4>
+      <p>Constraint propagation (naked singles + hidden singles) followed by depth-limited backtracking with MRV heuristic. ~2 ms per check.</p>
+      <h4>Used by</h4>
+      <ul>
+        <li>Both data-gen tracks (label every state)</li>
+        <li>Live RL sampler (balanced ~50/50 solvable/unsolvable batches)</li>
+        <li>Eval (per-state ground truth)</li>
+      </ul>
+    `
+  },
+
+  'trackA': {
+    title: 'Track A — Random-play multi-turn',
+    body: `
+      <h4>What it does</h4>
+      <p>Generates 1280 trajectories where each step picks a uniformly-random non-conflicting placement. CPU-only, ~1 minute total.</p>
+      <h4>Why it exists</h4>
+      <p>Acknowledged off-distribution per <code>SPEC.md §4</code>. Two purposes: (1) cheap pipeline smoke-test, (2) warm-start SFT data while the slow Track B runs.</p>
+      <h4>Pipeline</h4>
+      <pre>SudokuEnv(grid_size=9, difficulty='easy')
+  └─ TrajectoryGenerator(env)
+     └─ generate_balanced_dataset(
+          target_size=1280,
+          failure_ratio=1.0,  # only BP trajectories
+          seed=42)
+        └─ SFTFormatter(variant='sudoku_full',
+                        multi_turn=True,
+                        max_context_turns=10)
+          └─ save: data/sudoku_multiturn/</pre>
+      <h4>Output stats</h4>
+      <ul>
+        <li>32,062 samples (25,649 train / 6,413 val)</li>
+        <li>Class dist: 6.3% solvable / 93.7% unsolvable / 4.3% BP</li>
+        <li>BPs cluster at steps 0–10 (random play burns out fast)</li>
+        <li>Mean trajectory length: 12.2 steps</li>
+      </ul>
+      <h4>Known limitation</h4>
+      <p>Random play creates a state distribution that's <em>not</em> what an LLM agent encounters at inference. For deployment-relevant SFT, use Track B.</p>
+    `
+  },
+
+  'trackB': {
+    title: 'Track B — LLM-policy multi-turn',
+    body: `
+      <h4>What it does</h4>
+      <p>Generates trajectories by having Qwen2.5-1.5B-Instruct play Sudoku — the model picks moves, the env executes them, ground-truth labels come from the oracle. Matches SPA's self-play recipe.</p>
+      <h4>Pipeline</h4>
+      <pre>LLMTrajectoryGenerator(
+  model="Qwen/Qwen2.5-1.5B-Instruct",
+  use_minimal_data_gen_prompt=True)  ← key
+
+  └─ for each step:
+     prompt = MINIMAL system prompt
+              + current state
+     response = LLM.generate(...)
+     action = parse &lt;answer&gt; tag (or random fallback)
+     env.step(action) → ground-truth labels
+     record TrajectoryStep(...,
+       llm_raw_response=None  ← cleaned for multi-turn
+     )
+
+  └─ SFTFormatter(...)
+     └─ save: data/sudoku_llm_policy/</pre>
+      <h4>Why "minimal" data-gen prompt</h4>
+      <p>The base Qwen has never seen the full SPA-style XML format. With a 6-tag prompt:</p>
+      <ul>
+        <li>Parse rate ~30–50% (most outputs malformed)</li>
+        <li>Decode time ~700 tokens per response</li>
+        <li>Multi-turn priors balloon to ~5000 tokens by step 10</li>
+        <li>Per-trajectory wall time ~96s</li>
+      </ul>
+      <p>With minimal prompt (only <code>&lt;answer&gt;</code> required):</p>
+      <ul>
+        <li>Parse rate &gt;90%</li>
+        <li>Decode time ~30 tokens per response</li>
+        <li>Multi-turn priors stay tiny</li>
+        <li>Per-trajectory wall time ~30s — <strong>3–5× speedup</strong></li>
+      </ul>
+      <div class="hint">The full XML format is still produced in the SFT target row by <code>SFTFormatter.format_step()</code> using ground truth — see <strong>Format B</strong>.</div>
+      <h4>Why <code>llm_raw_response = None</code></h4>
+      <p>With minimal prompt, the raw response is just <code>&lt;answer&gt;…&lt;/answer&gt;</code> — useless as multi-turn prior context. Setting it to None makes <code>SFTFormatter</code> fall back to the template-generated ground-truth XML for prior turns, keeping the prior/target shape consistent (see <strong>Format C</strong>).</p>
+    `
+  },
+
+  'data-rand': {
+    title: 'data/sudoku_multiturn/',
+    body: `
+      <h4>Files</h4>
+      <ul>
+        <li><code>wm_train.parquet</code> — 25,649 samples</li>
+        <li><code>wm_val.parquet</code> — 6,413 samples</li>
+        <li>+ csv variants for inspection</li>
+      </ul>
+      <h4>Schema (each row)</h4>
+      <ul>
+        <li><code>data_source</code>: "sudoku"</li>
+        <li><code>prompt</code>: list of chat messages [system, user_state_0, asst_0, ..., user_state_K]</li>
+        <li><code>response</code>: target XML (full ground-truth tags + answer)</li>
+        <li><code>extra_info</code>: {step, is_solvable, is_breaking_point}</li>
+      </ul>
+      <h4>How it's used</h4>
+      <p>Loaded by <code>simple_sft_trainer.py</code> for Stage 2 SFT. Tokenizer applies chat template. Loss is masked to only the final assistant turn (the response).</p>
+    `
+  },
+
+  'data-llm': {
+    title: 'data/sudoku_llm_policy/',
+    body: `
+      <h4>Same schema as Track A</h4>
+      <p>Files and columns are identical to <code>data/sudoku_multiturn/</code> — the difference is in <strong>state distribution</strong>, not format.</p>
+      <h4>Why it's the headline</h4>
+      <ul>
+        <li>States match what an LLM agent encounters at inference</li>
+        <li>BPs come later in trajectories (subtle mistakes vs random ones)</li>
+        <li>Smoother SFT → RL transition (closer distributions)</li>
+        <li>Matches SPA's training recipe</li>
+      </ul>
+      <h4>Status</h4>
+      <p><span class="badge badge-running">RUNNING</span> — at time of writing, generating with the minimal data-gen prompt for ~30–60 min ETA.</p>
+    `
+  },
+
+  'sft-rand': {
+    title: 'SFT on random-play data (warm-start / ablation)',
+    body: `
+      <h4>Purpose</h4>
+      <p>Two purposes: (1) ablation column for §2-Q4 (random vs LLM-policy comparison), (2) warm-start checkpoint while Track B is still generating.</p>
+      <h4>Command</h4>
+      <pre>python src/training/simple_sft_trainer.py \\
+  --model_name_or_path Qwen/Qwen2.5-1.5B-Instruct \\
+  --train_file data/sudoku_multiturn/wm_train.parquet \\
+  --val_file data/sudoku_multiturn/wm_val.parquet \\
+  --output_dir outputs/sft_sudoku \\
+  --num_train_epochs 3 \\
+  --per_device_train_batch_size 4 \\
+  --gradient_accumulation_steps 8 \\
+  --learning_rate 1e-5 \\
+  --max_length 4096</pre>
+      <h4>What the trainer does</h4>
+      <ul>
+        <li>HuggingFace <code>Trainer</code> single-GPU</li>
+        <li>Effective batch size 32 (4 × 8 grad accum)</li>
+        <li>~2400 steps for 3 epochs over 25k samples</li>
+        <li>Loss masked to <strong>only the final assistant turn</strong> — prior assistant turns in multi-turn samples have label −100</li>
+      </ul>
+      <h4>Expected output</h4>
+      <p>Headline accuracy ~93–95% (mostly majority-class). BP recall biased toward early-game BPs only. Useful as ablation, not deployment.</p>
+    `
+  },
+
+  'sft-llm': {
+    title: 'SFT on LLM-policy data (headline)',
+    body: `
+      <h4>Same trainer, different dataset</h4>
+      <p>Identical to the random-play SFT command, but pointed at <code>data/sudoku_llm_policy/</code>. Output goes to <code>outputs/sft_sudoku_llm_policy/</code>.</p>
+      <h4>Why it's the headline</h4>
+      <p>This checkpoint is what gets handed to RL. The smaller distribution gap between SFT data and RL rollouts means RL starts from a better initial policy.</p>
+      <h4>What we expect</h4>
+      <ul>
+        <li>Headline accuracy lower than random-play SFT (~75–85%) — the dataset is harder</li>
+        <li>BP recall higher and less biased toward early-game BPs</li>
+        <li>Pass@1 should be preserved relative to base Qwen (Q2 trip-wire)</li>
+      </ul>
+    `
+  },
+
+  'rl': {
+    title: 'Stage 3 — RL (LiveEnvTerminationRLTrainer)',
+    body: `
+      <h4>Purpose</h4>
+      <p>Lift breaking-point recall above what SFT alone delivers, using asymmetric reward shaping and balanced live-env sampling.</p>
+      <h4>Components</h4>
+      <ul>
+        <li><code>src/training/rl_trainer.py</code> — <code>LiveEnvTerminationRLTrainer</code></li>
+        <li><code>src/training/config/rl_sudoku.yaml</code> — hyperparameters</li>
+        <li><code>src/data/live_trajectory_sampler.py</code> — generates balanced batches at training time</li>
+      </ul>
+      <h4>Why "live env" sampling matters</h4>
+      <p>Track A's parquet has 6.3% solvable / 93.7% unsolvable. Training RL on that distribution lets the model exploit class imbalance by always predicting "unsolvable." We sidestep this by sampling fresh trajectories from the env at each batch, controlling the solvable/unsolvable ratio to ~50/50.</p>
+      <h4>RL algorithm</h4>
+      <p>Group-Relative Policy Optimization (GRPO) — group of K rollouts per prompt, advantage = relative reward within group. Single-GPU friendly, no value network. Action-token loss mask (matches SPA's recipe).</p>
+      <h4>What "termination" means in the reward</h4>
+      <p>Reward is computed only on the <code>&lt;solvable&gt;</code> and <code>&lt;breaking_point&gt;</code> tags + format compliance. <strong>steps_left is excluded</strong> (trajectory-dependent, prone to reward hacking).</p>
+    `
+  },
+
+  'reward': {
+    title: 'Reward v2',
+    body: `
+      <h4>Asymmetric BP rewards</h4>
+      <pre>BP true positive   = +3.0
+BP false negative  = -2.0
+BP false positive  = -0.5</pre>
+      <p>Catching a deadlock matters far more than a false alarm. The asymmetry pushes the model to <em>over-predict</em> BPs — which is the right bias for the use case (early termination).</p>
+      <h4>Solvability rewards</h4>
+      <pre>Solvable correct  = +0.5
+Solvable wrong    = -0.25</pre>
+      <h4>Format compliance</h4>
+      <pre>+0.1 per XML tag present
+   in the model's output</pre>
+      <p>Without this, RL tends to forget the XML format and produce only raw answers, breaking eval and downstream usability.</p>
+      <h4>Why steps_left is excluded</h4>
+      <p>It's trajectory-dependent — what counts as "5 steps left" depends on env trajectory length, which the model can't determine from current state alone. Including it in the RL reward leads to hacking. Kept as an SFT-only target.</p>
+    `
+  },
+
+  'eval': {
+    title: 'Stage 4 — Evaluation',
+    body: `
+      <h4>What it produces</h4>
+      <p>Confusion matrices, F1 scores, per-deadlock-type recall, and (TODO) Pass@1 / Pass@8 for SPA comparability.</p>
+      <h4>Command</h4>
+      <pre>python evaluate_rl.py \\
+  --n-solvable 100 \\
+  --n-unsolvable 100 \\
+  --sft-path outputs/sft_sudoku_llm_policy \\
+  --rl-path  outputs/rl_sudoku</pre>
+      <h4>Eval set is generated, not stored</h4>
+      <p>Each eval run generates a fresh balanced set from the live env (100 solvable + 100 unsolvable trajectories). This avoids a static eval set going stale.</p>
+      <h4>What's still missing</h4>
+      <ul>
+        <li><strong>Pass@1 / Pass@8 mode</strong> — generate K rollouts per puzzle, count fraction that solve. Required for SPA comparability. <span class="badge badge-todo">TODO</span></li>
+        <li><strong>Distribution matching</strong> — eval should sample states from an LLM-policy distribution, not a random-play distribution. Currently the eval sampler is similar to random play.</li>
+      </ul>
+      <h4>Output artifact</h4>
+      <p>A dated writeup at <code>doc/eval_&lt;date&gt;_&lt;topic&gt;.md</code> per the project's doc/ folder convention.</p>
+    `
+  },
+
+  'baseline-vanilla': {
+    title: 'Baseline — Vanilla RL',
+    body: `
+      <h4>What it is</h4>
+      <p>The base Qwen2.5-1.5B-Instruct + RL with task-success reward only. No SFT cold-start, no <code>&lt;observation&gt;</code>/<code>&lt;prediction&gt;</code> tags, no termination tags.</p>
+      <h4>Why we need this</h4>
+      <p>It's SPA Table 2's "Vanilla RL" row. Without reproducing this baseline within reproduction noise, we can't claim SPA-style improvements are due to our recipe.</p>
+      <h4>SPA-reported numbers (Sudoku, Qwen2.5-1.5B)</h4>
+      <ul>
+        <li>Pass@1: 25.6 → ? (varies with training)</li>
+        <li>Pass@8: 47.3 → ? (varies)</li>
+      </ul>
+      <h4>Implementation cost</h4>
+      <p>Existing <code>rl_trainer.py</code> with reward zeroed except task success. ~3–6 GPU-hours.</p>
+      <p><span class="badge badge-todo">TODO</span> — required for headline result.</p>
+    `
+  },
+
+  'baseline-se': {
+    title: 'Baseline — State-Estimation RL',
+    body: `
+      <h4>What it is</h4>
+      <p>SPA's "State Estimation RL" — SFT with <code>&lt;observation&gt;</code> tags only (no <code>&lt;prediction&gt;</code>, no termination tags), then RL.</p>
+      <h4>Why we need this</h4>
+      <p>Isolates the contribution of <code>&lt;prediction&gt;</code> (transition modeling). SPA's analysis showed transition modeling is the key — but on Sudoku specifically the marginal gain might differ.</p>
+      <h4>Implementation cost</h4>
+      <p>Existing <code>simple_sft_trainer.py</code> works as-is. Need a variant of <code>SFTFormatter</code> that drops <code>&lt;prediction&gt;</code> and termination tags. ~1 day of work + ~3–6 GPU-hours.</p>
+      <p><span class="badge badge-todo">TODO</span> — required for headline result.</p>
+    `
+  },
+
+  'baseline-vagen': {
+    title: 'Baseline — VAGEN',
+    body: `
+      <h4>What it is</h4>
+      <p>SPA's "VAGEN" baseline — online world modeling <em>during</em> RL (not as a separate SFT stage). The reward includes both task success and world-modeling accuracy.</p>
+      <h4>Why we need this</h4>
+      <p>SPA's central argument is "world modeling belongs in SFT, not RL — RL should keep its accuracy objective pure." VAGEN is the foil. If we don't run it, we can't make the argument.</p>
+      <h4>Implementation cost</h4>
+      <p>Most work of any baseline. SPA cites their reimplementation against the RAGEN repo. We could either port it or cite SPA's numbers directly. ~2–3 days of work + GPU time.</p>
+      <p><span class="badge badge-todo">TODO</span> — required for full SPA comparability.</p>
+    `
+  },
+
+  'baseline-heuristic': {
+    title: 'Baseline — Heuristic',
+    body: `
+      <h4>What it is</h4>
+      <p>Pure constraint propagation — a 100-line program that says "this state is unsolvable" by running constraint propagation + bounded backtracking.</p>
+      <h4>Already implemented</h4>
+      <p><code>src/evaluation/sudoku_baseline.py</code> with simple (candidate counting) and full (constraint propagation) modes.</p>
+      <h4>What it tells us</h4>
+      <ul>
+        <li>BP precision: <strong>high</strong> — when the heuristic says doomed, it's almost always right</li>
+        <li>BP recall: <strong>low–mid</strong> — many doomed states pass the heuristic's check</li>
+        <li>Pass@1: <strong>n/a</strong> — heuristic doesn't play, only judges</li>
+      </ul>
+      <p>A useful comparison: the LLM should beat the heuristic specifically on <strong>recall</strong> (catching subtle doom) without sacrificing precision too much.</p>
+      <p><span class="badge badge-done">DONE</span></p>
+    `
+  },
+};
+
+function showPanel(id) {
+  const data = panelData[id];
+  if (!data) return;
+  const tabContent = document.querySelector('.tab-content.active');
+  const titleEl = tabContent.querySelector('[id^="panel-title-"]');
+  const bodyEl = tabContent.querySelector('[id^="panel-body-"]');
+  if (titleEl && bodyEl) {
+    titleEl.textContent = data.title;
+    bodyEl.innerHTML = data.body;
+  }
+  document.querySelectorAll('.node.active').forEach(n => n.classList.remove('active'));
+  if (event && event.currentTarget) event.currentTarget.classList.add('active');
+}
+
+function closePanel(tabName) {
+  // For now, just clear content
+  const titleEl = document.getElementById('panel-title-' + tabName);
+  const bodyEl = document.getElementById('panel-body-' + tabName);
+  if (titleEl) titleEl.textContent = 'Click a node for details';
+  if (bodyEl) bodyEl.innerHTML = '<p>Click any node in the flow to see details.</p>';
+  document.querySelectorAll('.node.active').forEach(n => n.classList.remove('active'));
+}
+
+function showTab(tabName) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+  document.getElementById('tab-' + tabName).classList.add('active');
+}
+</script>
+
+</body>
+</html>
