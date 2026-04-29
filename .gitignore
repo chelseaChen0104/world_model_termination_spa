@@ -10,9 +10,11 @@ venv/
 
 # Generated / regenerable artifacts (do NOT commit — see scripts/regen_random_multiturn.py
 # and scripts/generate_llm_policy_data_gpu.sh to recreate)
-data/
-outputs/
-logs/
+# IMPORTANT: anchor with leading slash so we only match top-level directories.
+# Without the slash, `data/` would also exclude `src/data/` — which is source code.
+/data/
+/outputs/
+/logs/
 
 # Editor / agent state — keep .claude/commands/ and .vscode/settings.json (project context)
 # but exclude per-user permissions and host endpoints

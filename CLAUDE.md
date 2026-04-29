@@ -1,7 +1,9 @@
 # World Model Termination Prediction (SPA)
 
+> **CLAUDE.md note (2026-04-28):** This file documents the project as of the v3 multi-turn-SFT era. After Tier A eval revealed a temporal-echo failure mode, design has moved to v4: single-step SFT, minimal response tags. **For current locked decisions, read [doc/SPEC.md](doc/SPEC.md) v4 first.** The architecture/code references below are still accurate; the *training-format* descriptions (multi-turn, full XML tag set, etc.) are deprecated. See [doc/report_2026-04-28_sft_b_diagnosis_and_pivot.md](doc/report_2026-04-28_sft_b_diagnosis_and_pivot.md) for the diagnosis and [doc/SPEC.md](doc/SPEC.md) §7.5 v4 for the current format spec.
+
 ## Project Goal
-Train an LLM to predict whether a game state is **solvable**, detect **breaking points** (transitions from solvable to unsolvable), and estimate **steps remaining** — enabling early termination of hopeless episodes. The primary environment is **Sudoku** (Sokoban is on hold).
+Train an LLM to predict whether a game state is **solvable** (action-conditional: `is_solvable(s_{t+1})` after the model's chosen action), enabling early termination of hopeless episodes. **Breaking points** are derived post-hoc from a `<solvable>` time-series rather than predicted as a separate tag (v4). The primary environment is **Sudoku** (Sokoban is out of scope per [doc/SPEC.md](doc/SPEC.md) §4 — fails predictive-gap criterion).
 
 ## Python Environment
 Use anaconda Python: `/Users/siyunchen/opt/anaconda3/bin/python`

@@ -25,6 +25,7 @@ from collections import defaultdict
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.environments.sokoban import SokobanEnv
+from src.environments.sudoku import SudokuEnv
 from src.data.sft_formatter import SFTFormatter
 from src.data.trajectory_generator import TrajectoryGenerator
 
@@ -130,8 +131,204 @@ def generate_balanced_eval_set(
     return all_samples
 
 
-def evaluate_model(model, tokenizer, eval_samples, system_prompt, model_name="Model"):
-    """Evaluate a model on the balanced eval set."""
+def evaluate_solvable_logprob(model, tokenizer, eval_samples, system_prompt, model_name="Model"):
+    """Extract per-sample P(<solvable>=true) and P(<solvable>=false) via teacher-forced
+    forward pass — bypasses greedy/sampling and reveals the model's actual confidence
+    distribution.
+
+    For each sample:
+      1. Build prompt = chat_template([system, user_state])
+      2. Append the response prefix up to and including the literal "<solvable>" string
+         (using the parquet's `response` field for samples loaded from parquet)
+      3. Single forward pass; read logits at the very next token position
+      4. Softmax → P(true), P(false)
+
+    Then sweep thresholds τ and report precision/recall at each.
+
+    Requires samples to have a "response" template (i.e., loaded from parquet via
+    --eval-from-parquet). For live-env single-turn samples, this would need extra
+    work to construct a fake response prefix; not implemented here.
+    """
+    import numpy as np
+    print(f"\n{'='*60}")
+    print(f"Logprob-based eval: {model_name}")
+    print(f"Samples: {len(eval_samples)}")
+    print(f"{'='*60}")
+
+    model.eval()
+
+    # Find single-token IDs for "true" and "false"
+    true_ids = tokenizer.encode("true", add_special_tokens=False)
+    false_ids = tokenizer.encode("false", add_special_tokens=False)
+    print(f"  tokenizer 'true'  → {true_ids} ({tokenizer.decode(true_ids)!r})")
+    print(f"  tokenizer 'false' → {false_ids} ({tokenizer.decode(false_ids)!r})")
+    if len(true_ids) != 1 or len(false_ids) != 1:
+        print("  WARNING: 'true'/'false' tokenize to multiple tokens — using first only")
+    true_id = true_ids[0]
+    false_id = false_ids[0]
+
+    results = []
+    skipped = 0
+    for i, sample in enumerate(eval_samples):
+        if "prompt_messages" not in sample or not sample.get("response"):
+            # Need a response template; live-env samples don't have one. Try to
+            # use the sample's own response field if present (we add it below for parquet loads).
+            skipped += 1
+            continue
+
+        messages = sample["prompt_messages"]
+        prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+        response = sample["response"]
+        idx = response.find("<solvable>")
+        if idx < 0:
+            skipped += 1
+            continue
+        prefix_response = response[: idx + len("<solvable>")]
+        full_text = prompt_text + prefix_response
+
+        inputs = tokenizer(full_text, return_tensors="pt", truncation=True, max_length=4096).to(model.device)
+        with torch.no_grad():
+            out = model(**inputs)
+            logits = out.logits[0, -1, :]
+            probs = torch.softmax(logits, dim=-1)
+            p_true = probs[true_id].item()
+            p_false = probs[false_id].item()
+
+        results.append({
+            "p_true": p_true,
+            "p_false": p_false,
+            "gt_solvable": sample["is_solvable"],
+            "is_breaking_point": sample.get("is_breaking_point", False),
+            "step_index": sample.get("step_index", -1),
+        })
+        if (i + 1) % 50 == 0:
+            print(f"  Processed {i+1}/{len(eval_samples)}...")
+
+    if skipped:
+        print(f"  Skipped {skipped} samples (no response template)")
+    print(f"\n  Total samples evaluated: {len(results)}")
+
+    if not results:
+        return {"per_sample": []}
+
+    # P(true) distribution by class
+    pos = [r["p_true"] for r in results if r["gt_solvable"]]
+    neg = [r["p_true"] for r in results if not r["gt_solvable"]]
+    print(f"\n  P(true) distribution by class:")
+    if pos:
+        print(f"    GT=true (n={len(pos)}):  mean={np.mean(pos):.3f}  median={np.median(pos):.3f}  std={np.std(pos):.3f}")
+    if neg:
+        print(f"    GT=false (n={len(neg)}): mean={np.mean(neg):.3f}  median={np.median(neg):.3f}  std={np.std(neg):.3f}")
+    if pos and neg:
+        print(f"    Separation (mean true − mean false): {np.mean(pos) - np.mean(neg):+.3f}")
+        # P(false) for unsolvable states is the relevant signal for early termination
+        p_false_on_false = [1 - r["p_true"] for r in results if not r["gt_solvable"]]
+        print(f"    P(false) on actually-unsolvable: mean={np.mean(p_false_on_false):.3f} median={np.median(p_false_on_false):.3f}")
+
+    # Threshold sweep — predict <solvable>=True if p_true > τ
+    print(f"\n  Threshold sweep (predict <solvable>=True if P(true) > τ):")
+    print(f"  {'τ':>6} {'Acc':>7} {'Prec(T)':>9} {'Rec(T)':>8} {'Spec':>7} {'F1(T)':>7} {'Prec(F)':>9} {'Rec(F)':>8}")
+    print(f"  {'-'*6} {'-'*7} {'-'*9} {'-'*8} {'-'*7} {'-'*7} {'-'*9} {'-'*8}")
+    for tau in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]:
+        tp = fp = tn = fn = 0
+        for r in results:
+            pred = r["p_true"] > tau
+            if r["gt_solvable"] and pred:        tp += 1
+            elif r["gt_solvable"] and not pred:  fn += 1
+            elif not r["gt_solvable"] and pred:  fp += 1
+            else:                                 tn += 1
+        n = tp + fp + tn + fn
+        acc  = (tp + tn) / max(1, n)
+        prT  = tp / max(1, tp + fp)
+        rcT  = tp / max(1, tp + fn)
+        spec = tn / max(1, tn + fp)
+        f1T  = 2 * prT * rcT / max(1e-9, prT + rcT)
+        prF  = tn / max(1, tn + fn)  # precision when predicting False
+        rcF  = tn / max(1, tn + fp)  # = specificity, recall on False class
+        print(f"  {tau:.2f}   {acc*100:6.1f} {prT*100:8.1f}% {rcT*100:7.1f}% {spec*100:6.1f}% {f1T*100:6.1f} {prF*100:8.1f}% {rcF*100:7.1f}%")
+
+    # ROC AUC if sklearn is available
+    try:
+        from sklearn.metrics import roc_auc_score
+        y = np.array([1 if r["gt_solvable"] else 0 for r in results])
+        s = np.array([r["p_true"] for r in results])
+        auc = roc_auc_score(y, s)
+        print(f"\n  ROC AUC: {auc:.3f}")
+    except Exception as e:
+        print(f"\n  ROC AUC: skipped ({e})")
+
+    return {"per_sample": results}
+
+
+def load_balanced_from_parquet(parquet_path, n_per_class=100, seed=42):
+    """Load eval samples directly from a training-format parquet, balanced by class.
+
+    The parquet's `prompt` column already contains the multi-turn message list as
+    seen during training (system + user/assistant pairs + final user state).
+    This makes the eval distribution match the training distribution exactly.
+
+    Returns list of dicts with keys:
+      - prompt_messages: list of {role, content} messages (multi-turn)
+      - is_solvable, is_breaking_point, deadlock_type, step_index
+    """
+    import pandas as pd
+    df = pd.read_parquet(parquet_path)
+
+    by_class = {("sol_T", "bp_F"): [], ("sol_F", "bp_T"): [], ("sol_F", "bp_F"): []}
+    for i in range(len(df)):
+        info = df.iloc[i]["extra_info"]
+        if isinstance(info, str):
+            info = json.loads(info)
+        sol = bool(info.get("is_solvable", False))
+        bp = bool(info.get("is_breaking_point", False))
+        if sol and not bp:
+            by_class[("sol_T", "bp_F")].append(i)
+        elif not sol and bp:
+            by_class[("sol_F", "bp_T")].append(i)
+        elif not sol and not bp:
+            by_class[("sol_F", "bp_F")].append(i)
+
+    rng = np.random.default_rng(seed)
+    selected = []
+    for cls, idxs in by_class.items():
+        n = min(n_per_class, len(idxs))
+        chosen = rng.choice(idxs, size=n, replace=False)
+        for i in chosen:
+            row = df.iloc[int(i)]
+            info = row["extra_info"]
+            if isinstance(info, str):
+                info = json.loads(info)
+            msgs = row["prompt"]
+            if hasattr(msgs, "tolist"):
+                msgs = msgs.tolist()
+            prompt_messages = [{"role": m["role"], "content": m["content"]} for m in msgs]
+            selected.append({
+                "prompt_messages": prompt_messages,
+                "response": row["response"],  # used by --metric solvable-logprob
+                "is_solvable": bool(info.get("is_solvable", False)),
+                "is_breaking_point": bool(info.get("is_breaking_point", False)),
+                "deadlock_type": info.get("deadlock_type"),
+                "step_index": info.get("step", -1),
+            })
+
+    rng.shuffle(selected)
+    n_sol = sum(1 for s in selected if s["is_solvable"])
+    n_bp = sum(1 for s in selected if s["is_breaking_point"])
+    n_unsol = len(selected) - n_sol
+    print(f"  Loaded multi-turn eval from {parquet_path}: {len(selected)} samples "
+          f"({n_sol} solvable, {n_unsol} unsolvable, {n_bp} BP)")
+    return selected
+
+
+def evaluate_model(model, tokenizer, eval_samples, system_prompt, model_name="Model",
+                    temperature=0.0):
+    """Evaluate a model on the balanced eval set.
+
+    Each sample can be either:
+      - single-turn:  has a "state" field; eval builds [system, user_state] prompt
+      - multi-turn:   has a "prompt_messages" field; eval uses it as-is (matches training)
+    """
     print(f"\n{'='*60}")
     print(f"Evaluating: {model_name}")
     print(f"Samples: {len(eval_samples)}")
@@ -157,23 +354,31 @@ def evaluate_model(model, tokenizer, eval_samples, system_prompt, model_name="Mo
     }
 
     for i, sample in enumerate(eval_samples):
-        # Build prompt
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Current state:\n{sample['state']}"},
-        ]
+        # Build prompt — multi-turn if sample has prompt_messages, else single-turn
+        if "prompt_messages" in sample:
+            messages = sample["prompt_messages"]
+            max_input_len = 4096
+            max_new_tokens = 600  # full response can be ~500 tokens (two grids + tags)
+        else:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Current state:\n{sample['state']}"},
+            ]
+            max_input_len = 1024  # bumped from 512 — system+state fits comfortably
+            max_new_tokens = 600
 
         prompt_text = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
 
-        inputs = tokenizer(prompt_text, return_tensors="pt", truncation=True, max_length=512).to(model.device)
+        inputs = tokenizer(prompt_text, return_tensors="pt", truncation=True, max_length=max_input_len).to(model.device)
         with torch.no_grad():
+            do_sample = temperature > 0.0
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=512,
-                temperature=0.1,
-                do_sample=False,
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample,
+                temperature=temperature if do_sample else 1.0,
                 pad_token_id=tokenizer.eos_token_id
             )
 
@@ -372,47 +577,219 @@ def print_sample_outputs(model, tokenizer, eval_samples, system_prompt, num_samp
         print(f"  ---")
 
 
+def rollout_one(model, tokenizer, env, puzzle_seed, system_prompt,
+                max_steps=30, temperature=0.7, max_context_turns=10,
+                max_new_tokens=512):
+    """Play one full game from the puzzle at `puzzle_seed`. Returns dict with success/steps/reason.
+
+    Mirrors training distribution: multi-turn with sliding window of last
+    `max_context_turns` user/assistant pairs.
+
+    `temperature=0` → greedy decode (deterministic, used for Pass@1).
+    `temperature>0` → sampling (used for Pass@k>1).
+    """
+    state = env.reset(seed=puzzle_seed)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Current state:\n{state}"},
+    ]
+
+    for step in range(max_steps):
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=4096).to(model.device)
+
+        with torch.no_grad():
+            do_sample = temperature > 0
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature if do_sample else 1.0,
+                do_sample=do_sample,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+        response_ids = outputs[0][inputs['input_ids'].shape[1]:]
+        response = tokenizer.decode(response_ids, skip_special_tokens=True).strip()
+
+        # Parse action — must be in <answer> tag or as a "place N at row R col C" pattern
+        m = re.search(r'<answer>(.*?)</answer>', response, re.DOTALL)
+        if m:
+            action_str = m.group(1).strip()
+        else:
+            m = re.search(r'place\s+\d+\s+at\s+row\s+\d+\s+col\s+\d+', response, re.IGNORECASE)
+            action_str = m.group(0) if m else None
+
+        if not action_str:
+            return {"success": False, "steps": step, "reason": "parse_failure"}
+
+        try:
+            next_state, reward, done, info = env.step(action_str)
+        except Exception as e:
+            return {"success": False, "steps": step, "reason": f"env_error:{type(e).__name__}"}
+
+        if not info.get('action_is_valid', True):
+            return {"success": False, "steps": step + 1, "reason": "invalid_action"}
+
+        if done:
+            success = info.get('success', False) or (info.get('is_solvable', False) and info.get('puzzle_complete', False))
+            # SudokuEnv: success when all cells filled correctly
+            if not success and 'puzzle_complete' in info:
+                success = bool(info['puzzle_complete'])
+            return {"success": bool(success), "steps": step + 1, "reason": "done"}
+
+        # Append turn and apply sliding window
+        messages.append({"role": "assistant", "content": response})
+        messages.append({"role": "user", "content": f"Action executed. Current state:\n{next_state}"})
+        if max_context_turns is not None and len(messages) > 2 * max_context_turns + 2:
+            # Keep system + last (2*max_context_turns + 1) messages (last user state included)
+            messages = [messages[0]] + messages[-(2 * max_context_turns + 1):]
+
+        state = next_state
+
+    return {"success": False, "steps": max_steps, "reason": "max_steps"}
+
+
+def evaluate_pass_at_k(model, tokenizer, env, system_prompt,
+                       n_puzzles=50, k_values=(1, 8),
+                       max_rollout_steps=30, sampling_temperature=0.7,
+                       max_context_turns=10, seed_start=20000,
+                       model_name="Model"):
+    """Compute Pass@1 (greedy) and Pass@K (sampled) over n_puzzles.
+
+    Pass@1 = fraction of puzzles where the greedy rollout solves it.
+    Pass@K = fraction where AT LEAST ONE of K sampled rollouts solves it.
+
+    Returns dict {f"pass_at_{k}": fraction, "n_puzzles": n}.
+    """
+    print(f"\n{'='*60}")
+    print(f"Pass@k Evaluation: {model_name}")
+    print(f"  Puzzles: {n_puzzles} | k_values: {k_values}")
+    print(f"  Greedy for Pass@1, sampling (temp={sampling_temperature}) for Pass@k>1")
+    print(f"{'='*60}")
+
+    model.eval()
+    max_k = max(k_values)
+    counts = {k: 0 for k in k_values}
+
+    for puzzle_idx in range(n_puzzles):
+        seed = seed_start + puzzle_idx
+        # Pass@1 — greedy
+        if 1 in k_values:
+            r = rollout_one(model, tokenizer, env, seed, system_prompt,
+                            max_steps=max_rollout_steps, temperature=0.0,
+                            max_context_turns=max_context_turns)
+            if r["success"]:
+                counts[1] += 1
+
+        # Pass@K — for K>1, do K sampled rollouts and check if any solved
+        for k in k_values:
+            if k == 1:
+                continue
+            any_solved = False
+            for k_idx in range(k):
+                r = rollout_one(model, tokenizer, env, seed, system_prompt,
+                                max_steps=max_rollout_steps,
+                                temperature=sampling_temperature,
+                                max_context_turns=max_context_turns)
+                if r["success"]:
+                    any_solved = True
+                    break  # Pass@K only needs ONE success
+            if any_solved:
+                counts[k] += 1
+
+        if (puzzle_idx + 1) % 5 == 0 or puzzle_idx == n_puzzles - 1:
+            partial = " | ".join(f"Pass@{k}={counts[k]}/{puzzle_idx+1} ({100*counts[k]/(puzzle_idx+1):.1f}%)" for k in k_values)
+            print(f"  Puzzle {puzzle_idx+1}/{n_puzzles} | {partial}")
+
+    results = {f"pass_at_{k}": counts[k] / n_puzzles for k in k_values}
+    results["n_puzzles"] = n_puzzles
+
+    print(f"\n  Final ({model_name}):")
+    for k in k_values:
+        print(f"    Pass@{k}: {counts[k]}/{n_puzzles} = {100*counts[k]/n_puzzles:.2f}%")
+
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate termination prediction models")
-    parser.add_argument("--sft-path", default="outputs/sft_termination/checkpoint-5730",
+    parser.add_argument("--env", default="sudoku", choices=["sudoku", "sokoban"],
+                        help="Environment to evaluate on")
+    parser.add_argument("--metric", default="all",
+                        choices=["termination", "pass-at-k", "solvable-logprob", "all"],
+                        help="Which evaluation mode to run. 'solvable-logprob' = teacher-forced "
+                             "logprob extraction at the <solvable> token, with threshold sweep. "
+                             "Requires --eval-from-parquet (needs response template).")
+    parser.add_argument("--sft-path", default="outputs/sft_sudoku_llm_policy",
                         help="Path to SFT model checkpoint")
-    parser.add_argument("--rl-path", default="outputs/rl_termination/step_1000",
+    parser.add_argument("--rl-path", default="outputs/rl_sudoku",
                         help="Path to RL model checkpoint")
-    parser.add_argument("--base-model", default="Qwen/Qwen2.5-0.5B-Instruct",
-                        help="Base model for tokenizer")
-    parser.add_argument("--n-solvable", type=int, default=100, help="Number of solvable eval samples")
-    parser.add_argument("--n-unsolvable", type=int, default=100, help="Number of unsolvable eval samples")
-    parser.add_argument("--sample-outputs", type=int, default=3, help="Number of sample outputs to print")
+    parser.add_argument("--base-model", default="Qwen/Qwen2.5-1.5B-Instruct",
+                        help="Base model for tokenizer (and as a baseline if no SFT/RL paths exist)")
+    # Termination-mode args
+    parser.add_argument("--n-solvable", type=int, default=100, help="(termination, single-turn) solvable eval samples")
+    parser.add_argument("--n-unsolvable", type=int, default=100, help="(termination, single-turn) unsolvable eval samples")
+    parser.add_argument("--sample-outputs", type=int, default=3, help="(termination) sample outputs to print")
+    parser.add_argument("--eval-from-parquet", default=None,
+                        help="Path to a training-format parquet (e.g. wm_val_filtered.parquet). "
+                             "When set, eval samples are loaded from this file and use the multi-turn "
+                             "prompts as-is, matching training distribution (overrides --n-solvable/--n-unsolvable).")
+    parser.add_argument("--n-per-class", type=int, default=100,
+                        help="(eval-from-parquet) max samples per class (solvable/BP/post-BP)")
+    parser.add_argument("--eval-temperature", type=float, default=0.0,
+                        help="(termination) sampling temperature; 0 = greedy (default), >0 = stochastic decode "
+                             "(useful as a probe to check whether the model has internal class discrimination "
+                             "buried by greedy's winner-takes-all decoding)")
+    # Pass@k-mode args
+    parser.add_argument("--n-puzzles", type=int, default=50, help="(pass-at-k) puzzles to evaluate")
+    parser.add_argument("--k", default="1,8", help="(pass-at-k) comma-separated k values, e.g. 1,8")
+    parser.add_argument("--max-rollout-steps", type=int, default=30, help="(pass-at-k) max steps per rollout")
+    parser.add_argument("--rollout-temperature", type=float, default=0.7, help="(pass-at-k) sampling temperature for k>1")
+    parser.add_argument("--max-context-turns", type=int, default=10, help="(pass-at-k) multi-turn sliding window")
+    # Skip flags
     parser.add_argument("--skip-sft", action="store_true", help="Skip SFT evaluation")
     parser.add_argument("--skip-rl", action="store_true", help="Skip RL evaluation")
+    parser.add_argument("--include-base", action="store_true", help="Also evaluate the base model (no fine-tuning)")
     args = parser.parse_args()
+    args.k_values = tuple(int(x) for x in args.k.split(","))
 
     print("=" * 60)
-    print("Balanced Evaluation for Termination Prediction")
+    print(f"Balanced Evaluation: env={args.env} metric={args.metric}")
     print("=" * 60)
 
     np.random.seed(42)
     torch.manual_seed(42)
 
-    # Generate balanced eval set from live environment
-    print("\nGenerating balanced eval set from live environment...")
-    env = SokobanEnv(dim_room=(6, 6), num_boxes=1, max_steps=100)
-    formatter = SFTFormatter(variant="full")
+    # ── Env + formatter ──────────────────────────────────────────────
+    if args.env == "sudoku":
+        env = SudokuEnv(grid_size=9, difficulty="easy", max_steps=args.max_rollout_steps)
+        formatter = SFTFormatter(variant="sudoku_full")
+    else:  # sokoban
+        env = SokobanEnv(dim_room=(6, 6), num_boxes=1, max_steps=100)
+        formatter = SFTFormatter(variant="full")
 
-    eval_samples = generate_balanced_eval_set(
-        env=env,
-        system_prompt=formatter.system_prompt,
-        n_solvable=args.n_solvable,
-        n_unsolvable=args.n_unsolvable,
-    )
+    # ── Termination-eval set (only built if needed) ──────────────────
+    eval_samples = None
+    if args.metric in ("termination", "solvable-logprob", "all"):
+        if args.eval_from_parquet:
+            print(f"\nLoading multi-turn eval samples from parquet: {args.eval_from_parquet}")
+            eval_samples = load_balanced_from_parquet(
+                args.eval_from_parquet,
+                n_per_class=args.n_per_class,
+            )
+        else:
+            print("\nGenerating balanced eval set from live environment...")
+            eval_samples = generate_balanced_eval_set(
+                env=env,
+                system_prompt=formatter.system_prompt,
+                n_solvable=args.n_solvable,
+                n_unsolvable=args.n_unsolvable,
+            )
+        n_sol = sum(1 for s in eval_samples if s["is_solvable"])
+        n_unsol = sum(1 for s in eval_samples if not s["is_solvable"])
+        n_bp = sum(1 for s in eval_samples if s["is_breaking_point"])
+        print(f"Eval set: {len(eval_samples)} total ({n_sol} solvable, {n_unsol} unsolvable, {n_bp} breaking points)")
 
-    # Distribution summary
-    n_sol = sum(1 for s in eval_samples if s["is_solvable"])
-    n_unsol = sum(1 for s in eval_samples if not s["is_solvable"])
-    n_bp = sum(1 for s in eval_samples if s["is_breaking_point"])
-    print(f"Eval set: {len(eval_samples)} total ({n_sol} solvable, {n_unsol} unsolvable, {n_bp} breaking points)")
-
-    # Load tokenizer
+    # ── Tokenizer ────────────────────────────────────────────────────
     print(f"\nLoading tokenizer from: {args.base_model}")
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -420,84 +797,110 @@ def main():
 
     all_results = {}
 
-    # Evaluate SFT model
+    def _run_one_model(label, path, results_key):
+        """Load a checkpoint, run the requested metrics, free GPU. Returns results dict."""
+        print(f"\nLoading {label} model from: {path}")
+        try:
+            mdl = AutoModelForCausalLM.from_pretrained(
+                path,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+        except Exception as e:
+            print(f"Failed to load {label} model: {e}")
+            return
+
+        bucket = {}
+        if args.metric in ("termination", "all"):
+            term_results, term_metrics = evaluate_model(
+                mdl, tokenizer, eval_samples, formatter.system_prompt,
+                model_name=f"{label} ({path})",
+                temperature=args.eval_temperature,
+            )
+            bucket["termination"] = term_results
+            print(f"\n--- Sample {label} Outputs ({args.sample_outputs} examples) ---")
+            print_sample_outputs(mdl, tokenizer, eval_samples, formatter.system_prompt,
+                                 args.sample_outputs, label)
+
+        if args.metric in ("solvable-logprob",):
+            lp_results = evaluate_solvable_logprob(
+                mdl, tokenizer, eval_samples, formatter.system_prompt,
+                model_name=f"{label} ({path})",
+            )
+            bucket["solvable_logprob"] = lp_results
+
+        if args.metric in ("pass-at-k", "all"):
+            pak_results = evaluate_pass_at_k(
+                mdl, tokenizer, env, formatter.system_prompt,
+                n_puzzles=args.n_puzzles,
+                k_values=args.k_values,
+                max_rollout_steps=args.max_rollout_steps,
+                sampling_temperature=args.rollout_temperature,
+                max_context_turns=args.max_context_turns,
+                model_name=f"{label} ({path})",
+            )
+            bucket["pass_at_k"] = pak_results
+
+        all_results[results_key] = bucket
+        del mdl
+        torch.cuda.empty_cache()
+
+    # ── Base model (optional) ────────────────────────────────────────
+    if args.include_base:
+        _run_one_model("BASE", args.base_model, "base")
+
+    # ── SFT ──────────────────────────────────────────────────────────
     if not args.skip_sft:
-        print(f"\nLoading SFT model from: {args.sft_path}")
-        try:
-            sft_model = AutoModelForCausalLM.from_pretrained(
-                args.sft_path,
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
-                trust_remote_code=True,
-            )
-            sft_results, sft_metrics = evaluate_model(
-                sft_model, tokenizer, eval_samples, formatter.system_prompt,
-                model_name=f"SFT ({args.sft_path})"
-            )
-            all_results["sft"] = sft_results
+        _run_one_model("SFT", args.sft_path, "sft")
 
-            print(f"\n--- Sample SFT Outputs ({args.sample_outputs} examples) ---")
-            print_sample_outputs(sft_model, tokenizer, eval_samples, formatter.system_prompt,
-                                args.sample_outputs, "SFT")
-
-            del sft_model
-            torch.cuda.empty_cache()
-        except Exception as e:
-            print(f"Failed to load SFT model: {e}")
-
-    # Evaluate RL model
+    # ── RL ───────────────────────────────────────────────────────────
     if not args.skip_rl:
-        print(f"\nLoading RL model from: {args.rl_path}")
-        try:
-            rl_model = AutoModelForCausalLM.from_pretrained(
-                args.rl_path,
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
-                trust_remote_code=True,
-            )
-            rl_results, rl_metrics = evaluate_model(
-                rl_model, tokenizer, eval_samples, formatter.system_prompt,
-                model_name=f"RL ({args.rl_path})"
-            )
-            all_results["rl"] = rl_results
+        _run_one_model("RL", args.rl_path, "rl")
 
-            print(f"\n--- Sample RL Outputs ({args.sample_outputs} examples) ---")
-            print_sample_outputs(rl_model, tokenizer, eval_samples, formatter.system_prompt,
-                                args.sample_outputs, "RL")
+    # ── Comparison table ─────────────────────────────────────────────
+    model_keys = [k for k in ("base", "sft", "rl") if k in all_results]
+    if len(model_keys) >= 2:
+        print("\n" + "=" * 80)
+        print("COMPARISON: " + " vs ".join(k.upper() for k in model_keys))
+        print("=" * 80)
 
-            del rl_model
-            torch.cuda.empty_cache()
-        except Exception as e:
-            print(f"Failed to load RL model: {e}")
+        # Termination metrics (if available)
+        if any("termination" in all_results[k] for k in model_keys):
+            print("\n[Termination metrics]")
+            term_rows = [
+                ("Format Compliance", "format_compliance"),
+                ("Solvable Accuracy", "solvable_accuracy"),
+                ("Solvable F1", "solvable_f1"),
+                ("BP Accuracy", "bp_accuracy"),
+                ("BP Precision", "bp_precision"),
+                ("BP Recall (key!)", "bp_recall"),
+                ("BP F1", "bp_f1"),
+            ]
+            header = f"{'Metric':<25} " + " ".join(f"{k.upper():>10}" for k in model_keys)
+            print(header)
+            print("-" * len(header))
+            for label, key in term_rows:
+                vals = [all_results[k].get("termination", {}).get(key, 0) for k in model_keys]
+                row = f"{label:<25} " + " ".join(f"{v:>9.1f}%" for v in vals)
+                print(row)
 
-    # Comparison table
-    if len(all_results) >= 2:
-        print("\n" + "=" * 70)
-        print("COMPARISON: SFT vs RL")
-        print("=" * 70)
-
-        comparison_metrics = [
-            ("Format Compliance", "format_compliance"),
-            ("Solvable Accuracy", "solvable_accuracy"),
-            ("Solvable F1", "solvable_f1"),
-            ("BP Accuracy", "bp_accuracy"),
-            ("BP Precision", "bp_precision"),
-            ("BP Recall (key!)", "bp_recall"),
-            ("BP F1", "bp_f1"),
-        ]
-
-        sft_r = all_results.get("sft", {})
-        rl_r = all_results.get("rl", {})
-
-        print(f"\n{'Metric':<25} {'SFT':>10} {'RL':>10} {'Delta':>10}")
-        print("-" * 57)
-
-        for label, key in comparison_metrics:
-            sft_val = sft_r.get(key, 0)
-            rl_val = rl_r.get(key, 0)
-            delta = rl_val - sft_val
-            delta_str = f"+{delta:.1f}" if delta >= 0 else f"{delta:.1f}"
-            print(f"{label:<25} {sft_val:>9.1f}% {rl_val:>9.1f}% {delta_str:>9}%")
+        # Pass@k metrics (if available)
+        if any("pass_at_k" in all_results[k] for k in model_keys):
+            print("\n[Pass@k metrics]")
+            sample = next(all_results[k]["pass_at_k"] for k in model_keys if "pass_at_k" in all_results[k])
+            k_keys = sorted(int(k.split("_")[-1]) for k in sample if k.startswith("pass_at_"))
+            header = f"{'Metric':<25} " + " ".join(f"{k.upper():>10}" for k in model_keys)
+            print(header)
+            print("-" * len(header))
+            for k_val in k_keys:
+                row_label = f"Pass@{k_val}"
+                vals = [all_results[k].get("pass_at_k", {}).get(f"pass_at_{k_val}", 0) for k in model_keys]
+                row = f"{row_label:<25} " + " ".join(f"{100*v:>9.2f}%" for v in vals)
+                print(row)
+            # n_puzzles for context
+            n_p = sample.get("n_puzzles", "?")
+            print(f"\n  (over n_puzzles={n_p})")
 
     print("\n" + "=" * 60)
     print("Evaluation Complete!")

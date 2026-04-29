@@ -2,9 +2,11 @@
 
 Operational guide. For research rationale see [SPEC.md](SPEC.md); for architecture see [CLAUDE.md](../CLAUDE.md); for chronological history see [progress.md](../progress.md).
 
-**Visual version:** open [pipeline_design.html](pipeline_design.html) in a browser for an interactive flow chart with click-through node details. Three tabs: Pipeline Overview, Format Flows (the three format concerns), Eval & Baselines (the comparison matrix).
+**Visual version:** open [pipeline_design.html](pipeline_design.html) in a browser for an interactive flow chart with click-through node details. (Note: the HTML viz reflects the v3 multi-turn pipeline and needs updating to v4 single-step format.)
 
-This doc is a **runbook**: what to run in what order, what each step produces, what success looks like at each stage. Sudoku-only per [SPEC.md](SPEC.md) v3. Components not yet implemented are flagged 🚧.
+This doc is a **runbook**: what to run in what order, what each step produces, what success looks like at each stage. Sudoku-only per [SPEC.md](SPEC.md). Components not yet implemented are flagged 🚧.
+
+> **v4 update (2026-04-28):** SFT format changed from multi-turn to **single-step samples** with minimal XML response (`<observation>` + `<prediction>` + `<solvable>` + `<answer>`). `<breaking_point>`, `<terminate_prob>`, `<steps_left>` tags dropped. See [SPEC.md](SPEC.md) §7.5 v4 and [report_2026-04-28_sft_b_diagnosis_and_pivot.md](report_2026-04-28_sft_b_diagnosis_and_pivot.md) for the rationale.
 
 ---
 
@@ -235,29 +237,40 @@ tmux new-session -d -s sft_a "bash -lc \"bash scripts/_run_with_env.sh python sr
 - Validation loss at end of each epoch (should drop, plateau by epoch 2–3).
 - Checkpoint loads cleanly: `AutoModelForCausalLM.from_pretrained("outputs/sft_sudoku/checkpoint-N")`.
 
-### 3.2 SFT on LLM-policy data (headline)
+### 3.2 SFT on LLM-policy data — minimal single-step format (headline, v4)
 
-Same command, just point at `data/sudoku_llm_policy/` and `outputs/sft_sudoku_llm_policy/`. Run after Stage 1B completes.
+> **Updated 2026-04-28** to single-step format per [SPEC.md](SPEC.md) §7.5 v4.
+
+Source data is `data/sudoku_llm_policy_minimal/` — produced by [scripts/reformat_to_minimal.py](../scripts/reformat_to_minimal.py) reformatting the existing Track B multi-turn parquets in place (no GPU regeneration needed).
 
 ```bash
-# After Stage 1B finishes:
 ssh autodl '
 cd /root/autodl-tmp/world_model_termination_spa
 tmux new-session -d -s sft_b "bash -lc \"bash scripts/_run_with_env.sh python src/training/simple_sft_trainer.py \
   --model_name_or_path Qwen/Qwen2.5-1.5B-Instruct \
-  --train_file data/sudoku_llm_policy/wm_train.parquet \
-  --val_file data/sudoku_llm_policy/wm_val.parquet \
-  --output_dir outputs/sft_sudoku_llm_policy \
+  --train_file data/sudoku_llm_policy_minimal/wm_train_filtered.parquet \
+  --val_file data/sudoku_llm_policy_minimal/wm_val_filtered.parquet \
+  --output_dir outputs/sft_sudoku_minimal \
   --num_train_epochs 3 \
   --per_device_train_batch_size 4 \
   --gradient_accumulation_steps 8 \
   --learning_rate 1e-5 \
-  --max_length 4096 \
-  2>&1 | tee logs/sft_b.log\""
+  --max_length 2048 \
+  --eval_steps 100 \
+  --save_steps 200 \
+  2>&1 | tee logs/sft_b_minimal.log\""
 '
 ```
 
-**This is the SFT model used downstream** in Stage 3. Stage 3.1's random-play SFT is for ablation comparison only.
+**What's different from v3:**
+- Train/val files come from the `_minimal` directory (single-step format)
+- `--max_length 2048` (was 4096) — single-step samples are ~600 tokens
+- `--save_steps 200` (was 500) — training is ~3× shorter, save more often
+- Output dir renamed to `outputs/sft_sudoku_minimal/` to keep separate from the deprecated multi-turn run
+
+**Wall-time estimate on H800:** ~25 min for 3 epochs over 6,221 samples. (Was ~90 min for the equivalent multi-turn run.)
+
+**This is the SFT model used downstream** in Stage 3.
 
 ---
 
@@ -344,14 +357,29 @@ bash scripts/_run_with_env.sh python evaluate_rl.py \
 - Per-deadlock-type recall (zero_candidates, constraint_propagation, no_solution)
 - Comparison: SFT vs RL vs (with `--baseline`) heuristic [`sudoku_baseline.py`](../src/evaluation/sudoku_baseline.py)
 
-### 5.2 SPA-comparable metrics — 🚧 not yet implemented
+### 5.2 SPA-comparable metrics — ✅ implemented
 
 Per [SPEC.md](SPEC.md) §3 success criteria, headline reporting must include **Pass@1 and Pass@8** for direct comparability with SPA Table 2.
 
-**To add:**
-- `evaluate_rl.py --metric pass-at-k --k 1,8 --rollouts-per-puzzle 8` mode
-- Generate K rollouts per puzzle, count fraction that solve the puzzle
-- Output: Pass@1, Pass@8 numbers comparable to SPA Table 2's Sudoku column (Qwen2.5-1.5B-Instruct row)
+**Done:** `evaluate_rl.py` now supports `--metric pass-at-k` via `evaluate_pass_at_k()` and `rollout_one()`.
+
+```bash
+# Eval SFT (default path) + base model on Sudoku — termination + Pass@k
+python evaluate_rl.py \
+  --env sudoku \
+  --metric all \
+  --skip-rl \
+  --include-base \
+  --n-puzzles 50 \
+  --k 1,8 \
+  --max-rollout-steps 30 \
+  --rollout-temperature 0.7
+```
+
+- **Pass@1** uses **greedy decode** (`temperature=0`) — deterministic, single rollout per puzzle.
+- **Pass@K (K>1)** uses **temperature-sampled rollouts**, success if ANY of K solves the puzzle. Short-circuits on first success per puzzle to save GPU time.
+- Multi-turn rollout matches training distribution (sliding window of `--max-context-turns`, default 10).
+- Cost estimate: ~30s per rollout (1.5B model on H800), so N=50 puzzles × (1 greedy + 8 sampled) ≈ 4 hours per model. Use smaller `--n-puzzles` for smoke tests.
 
 ### 5.3 SPA paper baselines — 🚧 not yet implemented
 
@@ -413,7 +441,7 @@ ssh autodl 'bash scripts/_run_with_env.sh python evaluate_rl.py ...'  # see §5.
 
 Ordered by load-bearing-ness for [SPEC.md](SPEC.md) §3 success criteria:
 
-1. **Pass@1 / Pass@8 mode in `evaluate_rl.py`** — without this, no SPA comparability. Highest priority.
+1. ~~**Pass@1 / Pass@8 mode in `evaluate_rl.py`**~~ — ✅ done. See §5.2.
 2. **Vanilla RL baseline run** — straightforward; existing `rl_trainer.py` with reward zeroed except task success.
 3. **State-Estimation-only SFT baseline** — Track B with `<prediction>` and termination tags removed from the formatter; existing `simple_sft_trainer.py` works as-is.
 4. **VAGEN baseline** — most work; requires implementing online world-modeling reward during RL. Cite SPA's VAGEN reimplementation if reproducible from RAGEN repo.

@@ -4,7 +4,9 @@
 
 - **v1** — first draft. Excluded Sokoban for "heuristic detector exists." Wrong reason.
 - **v2** — re-included Sokoban + FrozenLake citing SPA paper alignment. Wrong reason.
-- **v3** (current, 2026-04-28) — excludes Sokoban + FrozenLake on the *right* reason: neither environment exhibits the **predictive gap** between fatal move and formal failure that our research question requires. Sudoku is the only SPA-paper environment where a state can be "visually solvable but already doomed K steps before failure." See §1 "Predictive gap" for the criterion.
+- **v3** — 2026-04-28: excluded Sokoban + FrozenLake on the *right* reason — predictive-gap criterion (see §1).
+- **v4** — 2026-04-28: switched to single-step SFT samples + minimal tag set + action-conditional `<solvable>` after Tier A revealed temporal-echo failure mode.
+- **v5** (current, 2026-04-29) — **un-banned vLLM as a local inference accelerator.** v3 had grouped vLLM with Ray under "distributed training" out-of-scope, but vLLM can run single-process and provides ~5–10× speedup on autoregressive rollouts (matters for RL and Pass@k eval). Ray-based distributed coordination remains out of scope. Also: logprob-based eval revealed B-2/B-3 SFT have **AUC ≈ 0.46 — no learned discrimination at the `<solvable>` token**. Adding research questions on data-scale and task-difficulty (Q7, Q8 below) before committing to RL.
 
 **Use:** before any new approach, environment, or experiment, evaluate it against §5 (decision rubric). After every milestone, evaluate the result against §3 (success criteria) — that's what "on track" means.
 
@@ -37,12 +39,18 @@ Environments without this gap (where doomed-state ≡ formal-termination state, 
 1. **Q1 — Does SPA-style world-model SFT improve termination prediction?** Compared to SFT without `<observation>`/`<prediction>` world-modeling tags, does adding them lift breaking-point recall and solvability F1? Hypothesis: **yes**, by the same OOD-grounding mechanism that lifts Pass@1 in the SPA paper.
 2. **Q2 — Does adding termination prediction to the SPA training objective hurt or help downstream RL?** Concretely: does training the model to also produce `<solvable>` / `<breaking_point>` / `<steps_left>` tags during SFT reduce the SPA paper's Pass@1 / Pass@k gains on the **same env** (Sudoku), or does it preserve / improve them?
 3. **Q3 — Does asymmetric-reward RL (TP +3.0, FN −2.0, FP −0.5) on the termination objective lift BP recall above what SFT alone can deliver**, without breaking the format-compliance and answer-accuracy objectives RL is otherwise optimizing?
-4. **Q4 — Does training on LLM-policy data outperform training on random-play data** on an LLM-policy-distribution eval set? (SPA uses self-play; we test the contrast explicitly.)
-5. **Q5 — Does multi-turn context (game history) improve BP detection over single-turn** in fully-observable domains? SPA found that multi-turn RL "broadens the reasoning frontier" — does the same hold for termination prediction?
+4. **Q4 — Does training on LLM-policy data outperform training on random-play data** on an LLM-policy-distribution eval set? — **DEFERRED 2026-04-28**: Track A SFT was dropped to focus compute on the LLM-policy headline. Q4 is testable later if a random-play SFT checkpoint is added; until then, the comparison can be made indirectly via the heuristic baseline.
+5. **Q5 — Does multi-turn context (game history) improve BP detection over single-turn** in fully-observable domains? — **ANSWERED 2026-04-28: NO on Sudoku.** Multi-turn SFT with sliding-window priors created a *temporal-echo shortcut* that the model exploited: 84.7% of samples have priors that match the target label, so the model learned to copy prior assertions rather than condition on the grid. Multi-turn eval showed BP recall = 5%. We abandoned multi-turn SFT in favor of single-step samples (§7). Multi-turn RL rollouts are unaffected.
+6. **Q6 — Does this temporal-echo failure mode generalize to other multi-turn world-model SFT setups?** — *added v4*. If yes (across Kakuro / Nonogram / our Sudoku), it's a finding that affects SPA-style training broadly; if no, it's a Sudoku-specific quirk.
+7. **Q7 — Is the failure to learn `<solvable>` discrimination a data-scale problem, a task-difficulty problem, or a model-capacity problem?** — *added v5*. v4 showed AUC ≈ 0.46 (no learned signal). Three orthogonal probes:
+   - **Data scale:** does generating ~4× more diverse training data (5,000 trajectories across easy/medium/hard) lift discrimination?
+   - **Task difficulty:** does training on 4×4 Sudoku (matching SPA's exact setup) produce discrimination, when 9×9 fails? If yes, the issue is that 9×9 is too hard for 1.5B.
+   - **Model capacity:** out of scope (single-GPU 1.5B locked) but informs future scaling.
+8. **Q8 — Does our SPA-comparable result hold on the SPA paper's own configuration?** — *added v5*. Replicating the exact 4×4 / 6-empty-cells setup tells us whether our recipe matches the published numbers (sanity check: 1.6 → 59.6 Pass@1 with their setup); if it does, our 9×9 results say something about scaling.
 
-Q6 from v2 ("does the recipe transfer across Sokoban / FrozenLake / Sudoku") is **dropped** because Sokoban and FrozenLake fall outside the predictive-gap criterion (§1). Cross-environment transfer is interesting but is not what our research question is asking — at most, a future-work bullet.
+Q6-as-cross-env-transfer (from v2) is **dropped** because Sokoban and FrozenLake fall outside the predictive-gap criterion (§1). The new Q6 is the temporal-echo generalization question.
 
-Anything that doesn't help answer one of Q1–Q5 is suspect.
+Anything that doesn't help answer one of Q1–Q8 is suspect.
 
 ---
 
@@ -83,7 +91,7 @@ The comparison-of-interest is the last two rows against State-Estimation RL and 
 | **LLM-policy multi-turn data** | In-distribution states; SPA's self-play recipe. |
 | **Random-play data as a CPU-cheap intermediate** | For warm-start / pipeline debugging only. Acknowledged as off-distribution. |
 | **Multi-turn SFT with sliding window** | Matches SPA's findings that multi-turn broadens the reasoning frontier. |
-| **Single-GPU GRPO / PPO RL** | SPA was single-GPU; our budget is single H800; intentional simplicity over RAGEN/Ray/vLLM. |
+| **Single-GPU GRPO / PPO RL** | SPA was single-GPU; our budget is single H800; intentional simplicity over RAGEN/Ray. *v5: vLLM permitted as a local rollout accelerator.* |
 | **Asymmetric BP rewards (TP +3.0, FN −2.0, FP −0.5) + format compliance** | Our termination-specific reward shaping; orthogonal to SPA's answer-accuracy reward. |
 | **Balanced live-env sampling for RL termination** | Fixes class imbalance at training time. |
 | **Baseline set: vanilla RL, State-Estimation RL, VAGEN** | These are the SPA paper's baselines; we must reproduce / report against them. |
@@ -104,7 +112,9 @@ The comparison-of-interest is the last two rows against State-Estimation RL and 
 | **Domains without a ground-truth solvability oracle** | We rely on `check_solvability()` to label data and reward RL. No oracle → no project. |
 | **Larger models (>3B params)** | SPA showed the gain is largest on small models; our budget is single H800. Scaling laws are not our research question. |
 | **Multi-agent / cooperative termination** | Different problem class. |
-| **Distributed training (FSDP, Ray, vLLM serving)** | SPA was single-GPU; we mirror that constraint. The existing `sft_trainer.py` (FSDP) is dead code; `simple_sft_trainer.py` is the path. |
+| **Ray-based distributed coordination (RAGEN-style multi-actor)** | Heavyweight infrastructure not needed for single-GPU. SPA's RAGEN approach intentionally rejected. |
+| **FSDP / multi-GPU model parallelism** | Single-H800 constraint; Qwen-1.5B fits comfortably. `sft_trainer.py` (FSDP) is dead code; `simple_sft_trainer.py` is the path. |
+| ~~vLLM serving~~ | **Re-permitted in v5.** vLLM as a *local single-process inference accelerator* is in scope (for RL rollouts and Pass@k eval). It's not a distributed system; only Ray is. |
 | **`steps_left` in the RL reward** | Trajectory-dependent, prone to reward hacking. SFT-only signal. **Decided.** |
 | **Per-step accuracy on imbalanced data as a headline metric** | Trivial baseline gets 90%+ by predicting majority class. |
 | **Heavy chain-of-thought as the predicted artifact** | The thinking text is scaffolding; the labels (`<solvable>`, `<breaking_point>`) are what we evaluate and reward. |
@@ -162,91 +172,86 @@ If any of these show up in a writeup or commit, stop and re-evaluate:
 
 ### Locked (don't revisit without strong evidence):
 - **Single-environment scope: Sudoku.** Only SPA-paper env satisfying the §1 predictive-gap criterion. Cross-env extension is future work, not current scope.
-- **SPA-style training pipeline:** self-play data → world-model SFT (`<observation>`+`<prediction>` tags, observation-token loss masked, ground-truth state replacement) → PPO RL with answer-only loss mask. We extend the tag set with termination tags but do not change the training shape.
+- **SPA-style training pipeline:** self-play data → world-model SFT (`<observation>`+`<prediction>` tags, observation-token loss masked, ground-truth state replacement) → PPO RL with answer-only loss mask. We extend the tag set with `<solvable>` (termination) but do not change the training shape.
+- **Single-step SFT samples** (one (s_t, a_t, s_{t+1}) triple per sample). Prompt is `[system, user_state]`, response is `<think><observation>{s_t}</observation><prediction>{s_{t+1}}</prediction><solvable>{X}</solvable></think><answer>{a_t}</answer>`. *Locked v4 — replaces previous multi-turn lock.*
+- **Minimal response tag set:** `<observation>`, `<prediction>`, `<solvable>`, `<answer>`. Dropped `<breaking_point>`, `<terminate_prob>`, `<steps_left>` (see §7.5 v4).
+- **Action-conditional `<solvable>` semantics:** `<solvable>` predicts is_solvable(s_{t+1}) given the action in `<answer>`. Useful for "agent self-checks its own next move."
 - Single-GPU GRPO/PPO on Qwen2.5-1.5B-Instruct (matches SPA's main reported model).
-- Asymmetric BP rewards (TP +3.0, FN −2.0, FP −0.5) and format compliance (+0.1/tag) — our termination-specific shaping.
+- Asymmetric `<solvable>` rewards (TP +3.0, FN −2.0, FP −0.5) and format compliance (+0.1/tag) — our termination-specific shaping. *(v4: shifted from BP-tag rewards to solvable-tag rewards since `<breaking_point>` is dropped.)*
 - Balanced live-env sampling for the termination part of the RL reward.
-- Multi-turn SFT format with sliding window.
-- `steps_left` is SFT-only, not in RL reward.
 - LLM-policy data preferred over random-play for the headline SFT model.
 
 ### Open (revisit after first SFT+RL eval):
-- Sliding window size (currently 10).
+- Whether to drop **post-BP filler** samples from training (60% of current data, label is trivially "false" regardless of action). Tested as Run B-2 if Run B-1 (single-step format alone) doesn't lift BP recall sufficiently.
 - BP-class weighting in SFT cross-entropy loss.
 - Difficulty / grid-size choice (we currently use 9×9 easy Sudoku; SPA used 4×4 with 6 empty cells — choose one set for direct comparability).
 - RL hyperparameters (KL penalty, learning rate, group size).
 - Eval set size and composition.
 - Whether to retrain SFT on LLM-policy data, or skip directly to RL after random-play SFT.
-- **Multi-turn prior-turn content policy** — see §7.5 below.
 
 ---
 
-## 7.5 Format constraints
+## 7.5 Format constraints (v4)
 
-We have three distinct format flows and they must not be conflated. The actual code is in [src/data/llm_trajectory_generator.py](../src/data/llm_trajectory_generator.py) and [src/data/sft_formatter.py](../src/data/sft_formatter.py); this is the spec the code must satisfy.
+After the multi-turn temporal-echo failure (Tier A eval, 2026-04-28), we have **two** format flows. Multi-turn priors as a third flow are removed from this version of the spec.
 
 ### A. LLM data-generation output — `<answer>` is the only required tag (locked)
-The base model is prompted with a system prompt describing the full designed format (`<observation>`, `<prediction>`, `<steps_left>`, `<solvable>`, `<breaking_point>`, `<answer>`), but **only `<answer>...</answer>` is required to be parseable** for the action to be extracted. If unparseable, fall back to a random valid action and increment a parse-failure counter.
+The base model is prompted with a **minimal data-gen system prompt** (`DATA_GEN_SYSTEM_PROMPT_SUDOKU` in `LLMTrajectoryGenerator`) asking only for `<answer>place N at row R col C</answer>`. We don't ask for the full XML during data gen — the base Qwen can't follow it reliably and the wasted decode tokens slow generation 5–20×.
 
-**Why locked:** the base Qwen has never seen our format. Strict format requirements at this stage would produce mostly random fallbacks and defeat the purpose of using LLM-policy.
+**Quality metric to track:** `parse_failure_rate` per trajectory printed by the data-gen logger. If > 30%, switch back to full prompt or upgrade base model.
 
-**Quality metric to track (not a gate, just monitor):** `parse_failure_rate` per trajectory — if > ~30% across the dataset, the data is effectively random-play and trackB loses its value over Track A. Print this in the per-trajectory log.
-
-### B. SFT target format — full XML with ground-truth content (locked)
-The training target row, built by `format_step()`, must contain **all** designed tags:
+### B. SFT target format — minimal XML with ground-truth content (locked v4)
+The training target row, built by `format_step()` with variant `sudoku_minimal`, contains exactly:
 
 ```
 <think>
-<observation>{step.state}</observation>             ← env, not LLM
-<prediction>{step.next_state}</prediction>           ← env, not LLM
-<terminate_prob>...</terminate_prob>                 ← derived from steps_left
-<steps_left>{step.steps_left_bucket}</steps_left>    ← oracle
-<solvable>{step.is_solvable}</solvable>              ← oracle
-<breaking_point>{step.is_breaking_point}</breaking_point>  ← oracle
+<observation>{step.state}</observation>             ← env, not LLM (SPA grounding)
+<prediction>{step.next_state}</prediction>           ← env, not LLM (SPA grounding)
+<solvable>{step.is_solvable}</solvable>              ← oracle, action-conditional
 </think>
-<answer>{step.action_name}</answer>                  ← what was actually executed
+<answer>{step.action_name}</answer>                  ← action chosen during data gen
 ```
 
-**Ground-truth replacement is required**, mirroring SPA §2.2: "we replace the model's beliefs about current states ŝₜ and future states ŝₜ₊₁ with the ground-truth states." Even if the LLM produced perfectly-formatted XML during data gen, we discard it for the target row and rebuild from oracle.
+**Action-conditional semantics:** `<solvable>` is `is_solvable(s_{t+1})` — the solvability *after* the model's chosen action — not the solvability of the current state s_t. This matches our agent-self-checking-its-next-move use case.
 
-**Why locked:** comparability with SPA's training shape. Modifying this format (e.g., dropping `<prediction>`) breaks Q1/Q2 measurability.
+**Ground-truth replacement** is required, mirroring SPA §2.2.
 
-### C. Multi-turn prior-turn content — open research decision
-Prior assistant turns in multi-turn samples currently use `step.llm_raw_response` if present, else fall back to template-generated ground-truth. So a multi-turn sample looks like:
+**Tags dropped from v3:**
+- `<terminate_prob>` — confusing semantics ("how soon will trajectory end" ≠ "is this state doomed")
+- `<steps_left>` — SFT-only, not in RL reward, redundant with knowing `done_label`
+- `<breaking_point>` — derivable post-hoc from a `<solvable>` time-series at eval (BP at step t = `solvable[t-1]==True AND solvable[t]==False`); explicit tag was empirically not learned (5% recall) and added redundant training signal
 
-```
-[system] {full_format_prompt}
-[user] Current state: {state_0}
-[assistant] {llm_raw_response_0}    ← LLM output, may be malformed
-[user] Action executed. Current state: {state_1}
-[assistant] {llm_raw_response_1}    ← LLM output, may be malformed
-...
-[user] Action executed. Current state: {state_K}
-[assistant] {format_step(step_K)}   ← TARGET — clean ground-truth XML
-```
+**Why locked:** matches SPA's actual SFT shape exactly (their samples are also single-step (s, a, s') triples) plus our one termination-extension tag. Direct comparability.
 
-**Two valid policies, both defensible:**
+### Single-turn vs multi-turn — locked: single-step
 
-1. **Keep LLM-raw priors** (current behavior) — matches inference distribution: the model's own prior outputs at deployment will also be imperfect. Realistic noise.
-2. **Replace prior content with ground-truth-formatted XML** — cleaner training signal; prior turns model the format the model is being trained to produce. SPA's RL is single-turn, so they don't take a position on this.
+After Tier A eval revealed multi-turn SFT learned a temporal-echo shortcut (BP recall 5% on multi-turn eval, 0% on single-turn eval), we **dropped multi-turn SFT entirely**:
+- Each step in each trajectory is its own training sample.
+- Prompt: `[system, user_state]` — no history.
+- Response: as in §B above.
+- RL stage is still multi-turn rollout (the agent acts in the env multi-turn); the change is only at SFT.
 
-**Decision is open.** Track parse_failure_rate from §A; if it's high (>30%), policy (1) gives the model garbage to condition on and (2) becomes more attractive. If low, (1) is fine.
+**Why this is the right call:**
+- Sudoku is fully observable: the label `is_solvable(s_{t+1})` is a function of `(s_t, a_t)`, not of the trajectory history. History adds zero information about the label.
+- Multi-turn priors gave the model a label-history shortcut (echo) that 84.7% of samples could exploit, drowning out the 15.3% gradient signal where the model actually had to look at the grid.
+- Single-step removes the shortcut entirely. Every sample requires grid + action conditioning.
 
 ### Format-related anti-goals (extends §6)
 
-- 🚫 Reporting BP recall on a model whose `<breaking_point>` tag is wrapped in unexpected whitespace, code fences, or alternative casing not handled by the eval parser. Eval must be tolerant of LLM-output noise OR the model must be reliably formatted; pick one and document.
-- 🚫 Changing `format_step()`'s tag set or order without re-running all baselines. The XML format IS the API between SFT, RL, and eval — drift is silent and corrosive.
-- 🚫 Using LLM-raw multi-turn priors **without measuring `parse_failure_rate`**. We need to know whether the priors are signal or noise.
+- 🚫 Adding back any of the dropped tags (`<terminate_prob>`, `<steps_left>`, `<breaking_point>`) without first running an ablation showing the tag improves a metric we care about.
+- 🚫 Reverting to multi-turn SFT without a hypothesis explaining why temporal echo wouldn't recur. The empirical result is clear; need new evidence to overturn it.
+- 🚫 Changing the `<solvable>` semantics from action-conditional to state-only without updating reward design and eval pipeline together. Mixing semantics across stages is a silent bug source.
 
 | Current activity | Pass/Fail against spec |
 |---|---|
 | Sudoku as sole target | ✅ §4 in scope; only env satisfying §1 |
 | Sokoban work on hold (per [CLAUDE.md](../CLAUDE.md)) | ✅ correct call — out of scope per §4 (no predictive gap) |
 | FrozenLake not implemented | ✅ correct call — out of scope per §4 (no predictive gap) |
-| Random-play multi-turn data (Track A, done) | ✅ §4 acknowledged intermediate |
-| LLM-policy multi-turn data (Track B, running) | ✅ §4 in scope; this is SPA's self-play recipe |
-| Multi-turn SFT with sliding window | ✅ §4 in scope, supports §2 Q5 |
-| Plan to RL with reward v2 | ✅ §4 in scope, supports §2 Q3 |
+| Random-play multi-turn data (Track A, done) | ⚠️ generated, but multi-turn structure superseded — kept on disk for reference, not used downstream |
+| LLM-policy multi-turn data (Track B, done) | ⚠️ generated, but reformatted to single-step in `data/sudoku_llm_policy_minimal/` for headline training |
+| **Single-step SFT (Run B-1, in progress)** | ✅ §7 locked v4 |
+| Multi-turn SFT (failed Run B-0) | ❌ deprecated by §7 v4 — kept as cautionary example in [report_2026-04-28_sft_b_diagnosis_and_pivot.md](report_2026-04-28_sft_b_diagnosis_and_pivot.md) |
+| Plan to RL with reward v2 (action-conditional `<solvable>` reward) | ✅ §4 in scope, supports §2 Q3 |
 | **Plan to compare against vanilla RL, State-Estimation RL, VAGEN** | ❌ Not currently in the plan. Add to remaining-steps in [progress.md](../progress.md). This is a §3 success criterion. |
 | Plan to retrain SFT on LLM-policy data | ✅ supports §2 Q4 |
 | Plan to compare against `sudoku_baseline.py` heuristic | ✅ §3 nice-to-have, not the load-bearing baseline |
