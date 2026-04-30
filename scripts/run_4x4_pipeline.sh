@@ -80,7 +80,7 @@ $PYTHON -u src/training/simple_sft_trainer.py \
     --gradient_accumulation_steps 8 \
     --learning_rate 1e-5 \
     --max_length 1024 \
-    --eval_steps 50 \
+    --eval_steps 10 \
     --save_steps 100 \
     2>&1 | tee logs/sft_4x4.log
 

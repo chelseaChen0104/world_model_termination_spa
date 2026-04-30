@@ -56,7 +56,7 @@ class SFTConfig:
 
     # Logging
     logging_steps: int = 10
-    eval_steps: int = 100
+    eval_steps: int = 25
     save_steps: int = 500
     save_total_limit: int = 3
 
@@ -196,7 +196,7 @@ def main():
     parser.add_argument("--bf16", action="store_true", default=True)
     parser.add_argument("--gradient_checkpointing", action="store_true", default=True)
     parser.add_argument("--logging_steps", type=int, default=10)
-    parser.add_argument("--eval_steps", type=int, default=100)
+    parser.add_argument("--eval_steps", type=int, default=25)
     parser.add_argument("--save_steps", type=int, default=500)
     args = parser.parse_args()
 

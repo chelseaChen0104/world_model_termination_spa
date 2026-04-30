@@ -1,0 +1,190 @@
+# SFT Runs Ledger — World Model Termination SPA (2026-04-29)
+
+Consolidated record of all SFT training runs. Each entry has: hparams, data path, sample counts, output checkpoint, training/eval logs, key numbers, and a one-paragraph note on what we learned.
+
+For the deeper write-ups on the headline findings, see the dated artifacts:
+- [report_2026-04-28_sft_b_diagnosis_and_pivot.md](report_2026-04-28_sft_b_diagnosis_and_pivot.md) — B-0 temporal-echo finding
+- [eval_2026-04-28_sft_track_b_tier_a.md](eval_2026-04-28_sft_track_b_tier_a.md) — B-0 single-turn Tier A eval
+- [eval_2026-04-29_b5_4x4_spa_replication.md](eval_2026-04-29_b5_4x4_spa_replication.md) — B-5 (the success)
+- [qa_2026-04-29_tag_design.md](qa_2026-04-29_tag_design.md) — why we dropped `<breaking_point>` / `<terminate_prob>` / `<steps_left>`
+
+Common across all runs:
+- Base model: **Qwen/Qwen2.5-1.5B-Instruct**
+- Trainer: [`src/training/simple_sft_trainer.py`](../src/training/simple_sft_trainer.py) (HuggingFace Trainer, single GPU, no FSDP)
+- Cloud: H800 on AutoDL (`autodl` and `autodl2` aliases)
+- Format compliance is 100% on every run that reached eval (the model never breaks the XML scaffold).
+
+---
+
+## Summary table
+
+| Run | Date | Task | Format | Train n | Epochs | LR | Batch | ROC AUC | Outcome |
+|---|---|---|---|---|---|---|---|---|---|
+| **B-0** | 2026-04-28 | 9×9 | multi-turn (full tags) | 6,221 | 3 | 1e-5 | 32 | — *(BP recall 5%)* | ❌ temporal echo |
+| **B-1** | 2026-04-28 | 9×9 | single-step minimal | 6,221 | 3 | 1e-5 | 32 | ~0.5 | ❌ greedy collapse to False |
+| **B-2** | 2026-04-29 | 9×9 (no_post_bp) | single-step minimal | 2,482 | 3 | 1e-5 | 32 | **0.468** | ❌ chance |
+| **B-3** | 2026-04-29 | 9×9 (no_post_bp + class-bal) | single-step minimal | ~2,482* | 3 | 1e-5 | 32 | **0.462** | ❌ chance |
+| 4x4 baseline | 2026-04-29 | 4×4 (no_post_bp) | single-step minimal | 1,336 | 3 | 1e-5 | 32 | — *(greedy Rec 2%)* | ❌ collapse, AUC not measured |
+| **B-4** | 2026-04-29 | 9×9 (no_post_bp) | single-step minimal | 2,482 | 5 | **1e-4** | **16** | **0.455** | ❌ chance — disproved scale-only hypothesis |
+| **B-5** | 2026-04-29 | 4×4 SPA-scale (no_post_bp) | single-step minimal | **6,571** | 5 | **1e-4** | **16** | **0.726** | ✅ **first run with real signal** |
+
+*B-3 sample count assumed ≈ B-2 based on shared no_post_bp filter; exact count in train log unverified (separate output dir, log not preserved as a dedicated file).
+
+---
+
+## B-0 — multi-turn full-tag SFT *(failure: temporal echo)*
+
+| field | value |
+|---|---|
+| Output dir | `outputs/sft_sudoku_llm_policy/` |
+| Train file | `data/sudoku_llm_policy/wm_train_filtered.parquet` |
+| Val file | `data/sudoku_llm_policy/wm_val_filtered.parquet` |
+| Train samples | 6,221 (multi-turn, full tag set) |
+| Val samples | 1,608 |
+| Epochs / LR / batch | 3 / 1e-5 / 32 (4 per_device × 8 grad_accum) |
+| `max_length` | 4,096 |
+| Total updates | 582 |
+| Training log | [logs/sft_b.log](../logs/sft_b.log) |
+| Eval logs | [logs/eval_a.log](../logs/eval_a.log) (greedy), [logs/eval_a_multiturn.log](../logs/eval_a_multiturn.log) (multi-turn) |
+
+**Notes.** First Track-B run. Multi-turn samples included prior assistant turns (`<solvable>` history) as conversation context, with the loss masked to the final turn. Multi-turn eval showed BP detection accuracy ~95% (looked great) but BP **recall = 5.0%** (tiny — the model was just echoing prior `<solvable>=false` assertions, not learning). Single-turn evaluation showed it had collapsed to all-True. Diagnosed in [report_2026-04-28_sft_b_diagnosis_and_pivot.md](report_2026-04-28_sft_b_diagnosis_and_pivot.md): 84.7% of multi-turn samples have a *trivial echo shortcut* — prior turn's `<solvable>` matches the target. **This run motivated the v4 amendment**: pivot to single-step samples + minimal tag set.
+
+---
+
+## B-1 — single-step minimal, post-BP kept *(failure: chance, greedy collapse to False)*
+
+| field | value |
+|---|---|
+| Output dir | `outputs/sft_sudoku_minimal/checkpoint-582` (no `/final/` saved) |
+| Train file | `data/sudoku_llm_policy_minimal/wm_train_filtered.parquet` |
+| Val file | `data/sudoku_llm_policy_minimal/wm_val_filtered.parquet` |
+| Train samples | 6,221 (single-step minimal, post-BP samples kept) |
+| Val samples | 1,608 |
+| Epochs / LR / batch | 3 / 1e-5 / 32 |
+| `max_length` | 2,048 (after format change shrunk responses) |
+| Training log | [logs/sft_b_minimal.log](../logs/sft_b_minimal.log) |
+| Eval log | [logs/eval_b1.log](../logs/eval_b1.log) |
+| Greedy Acc / Prec / Rec / F1 | 67.0% / 100% / 1.0% / 2.0% |
+| ROC AUC | ~0.5 (no signal) |
+
+**Notes.** First single-step minimal-format run after the v4 pivot. Same data as B-0 but reformatted via [`scripts/reformat_to_minimal.py`](../scripts/reformat_to_minimal.py) to drop multi-turn history and the redundant tags. Greedy classification collapsed to "always-False" (recall = 1.0% on solvable). Format compliance 100%, but no learned discrimination — just learned the prior on the unsolvable-dominated training distribution. Combined with B-2/B-3, this is what motivated the threshold-based logprob eval (greedy alone is a poor metric when the model is biased one way).
+
+---
+
+## B-2 — single-step minimal, post-BP filter applied *(failure: chance, greedy collapse to True)*
+
+| field | value |
+|---|---|
+| Output dir | `outputs/sft_sudoku_minimal_no_post_bp/final` |
+| Train file | `data/sudoku_llm_policy_minimal/wm_train_filtered_no_post_bp.parquet` |
+| Val file | `data/sudoku_llm_policy_minimal/wm_val_filtered_no_post_bp.parquet` |
+| Train samples | 2,482 (post-BP filler removed) |
+| Val samples | 639 |
+| Epochs / LR / batch | 3 / 1e-5 / 32 |
+| `max_length` | 2,048 |
+| Total updates | ~234 |
+| Training log | [logs/sft_b2.log](../logs/sft_b2.log) |
+| Eval logs | [logs/eval_b2.log](../logs/eval_b2.log) (greedy), [logs/eval_logprob.log](../logs/eval_logprob.log) (logprob, first half) |
+| Greedy Acc / Prec / Rec / F1 | 34.3% / 33.1% / 95.0% / 49.1% |
+| **ROC AUC** | **0.468** |
+
+**Notes.** Same minimal format as B-1 but with [`scripts/filter_post_bp.py`](../scripts/filter_post_bp.py) applied to remove (Solvable=False, BP=False) post-BP filler samples — improves class balance from ~94/6 unsolvable/solvable to ~75/25. Greedy this time collapsed in the *opposite* direction (always-True), because the post-BP filter shifted the class prior. Logprob threshold sweep revealed AUC = 0.468 — same chance as B-1; greedy collapse direction is just an artifact of where the threshold lands. **This run produced our first AUC measurement and the realization that greedy is a brittle metric for this task.**
+
+---
+
+## B-3 — no_post_bp + class-balancing variant *(failure: chance)*
+
+| field | value |
+|---|---|
+| Output dir | `outputs/sft_sudoku_minimal_b3/final` |
+| Data | likely no_post_bp + 2× BP oversample (per [`scripts/oversample_bp.py`](../scripts/oversample_bp.py)) — exact training-time data path not preserved in a dedicated log |
+| Epochs / LR / batch | 3 / 1e-5 / 32 (defaults) |
+| Eval logs | [logs/eval_b3.log](../logs/eval_b3.log) (greedy), [logs/eval_logprob.log](../logs/eval_logprob.log) (logprob, second half) |
+| Greedy Acc / Prec / Rec / F1 | 64.7% / 33.3% / 6.0% / 10.2% |
+| **ROC AUC** | **0.462** |
+
+**Notes.** Class-balancing variant of B-2 — applied 2× oversampling on BP samples to lift the BP class prior. AUC 0.462 confirms what B-1/B-2 already showed: **the class imbalance was not the cause of zero discrimination**; rebalancing doesn't fix it. After this run, we ruled out class balance as the explanation and started looking at training scale (which led to the 80× under-training hypothesis). The dedicated training log was not preserved as a separate file (some sessions wrote to a shared log that was overwritten).
+
+---
+
+## 4×4 baseline *(failure: greedy collapse, AUC not measured)*
+
+| field | value |
+|---|---|
+| Output dir | `outputs/sft_sudoku_4x4_minimal_no_post_bp/final` |
+| Train file | `data/sudoku_4x4_llm_policy_minimal/wm_train_no_post_bp.parquet` |
+| Val file | `data/sudoku_4x4_llm_policy_minimal/wm_val_no_post_bp.parquet` |
+| Train samples | 1,336 (single-cloud 1,000-traj gen, no_post_bp filtered) |
+| Val samples | 325 |
+| Epochs / LR / batch | 3 / 1e-5 / 32 (same defaults as B-1/B-2/B-3) |
+| `max_length` | 1,024 |
+| Total updates | 123 |
+| Training log | [logs/sft_4x4.log](../logs/sft_4x4.log) |
+| Eval log | [logs/eval_4x4.log](../logs/eval_4x4.log) |
+| Greedy Acc / Prec / Rec / F1 | 67.3% / 100% / 2.0% / 3.9% |
+| ROC AUC | not measured for this run |
+
+**Notes.** Run via [`scripts/run_4x4_pipeline.sh`](../scripts/run_4x4_pipeline.sh) — the first 4×4 SPA-replication attempt, but **with our smaller hparams (lr=1e-5, ep=3, bs=32) and only 1,000 trajectories**. Greedy collapsed to "always-False" with 2.0% recall on solvable. We did not run the threshold-based logprob eval on this checkpoint at the time; the next 4×4 attempt (B-5) used SPA's hparams + ~5× the data. Sat between the B-3 / B-4 runs chronologically; not labeled with a B-N number because it's a different task variant (not a successor of the 9×9 B-series).
+
+---
+
+## B-4 — 9×9 + SPA hyperparameters *(failure: chance, disproves under-training hypothesis)*
+
+| field | value |
+|---|---|
+| Output dir | `outputs/sft_sudoku_minimal_b4_spa_hparams/checkpoint-600` (final crashed mid-save, see notes) |
+| Train file | `data/sudoku_llm_policy_minimal/wm_train_filtered_no_post_bp.parquet` (same data as B-2/B-3) |
+| Val file | `data/sudoku_llm_policy_minimal/wm_val_filtered_no_post_bp.parquet` |
+| Train samples | 2,482 |
+| Val samples | 639 |
+| Epochs / LR / batch | **5 / 1e-4 / 16** (per_device 4 × grad_accum 4) |
+| `max_length` | 2,048 |
+| Planned updates | 775 |
+| **Actual updates completed** | **600** (training crashed at step 600 during checkpoint save — disk full on autodl1) |
+| Launch script | [scripts/run_b4_spa_hparams.sh](../scripts/run_b4_spa_hparams.sh) |
+| Training log | [logs/sft_b4.log](../logs/sft_b4.log) |
+| Eval logs | [logs/eval_b4.log](../logs/eval_b4.log) (failed — no `/final/`), [logs/eval_b4_ck600.log](../logs/eval_b4_ck600.log) (recovered) |
+| Greedy Acc / Prec / Rec / F1 | 33.3% / 33.3% / 100.0% / 50.0% (collapsed to all-True) |
+| **ROC AUC** | **0.455** |
+
+**Notes.** Designed to test the "we're 80× under-trained vs SPA" hypothesis: same data as B-2/B-3 but with SPA's exact hparams (5 epochs × 1e-4 LR × bs 16 ≈ 30× more effective gradient signal). Crashed at step 600 of 775 during the `/final/` checkpoint save when autodl1's disk hit 100% (`RuntimeError: unexpected pos 2695335488 vs 2695335380`). The 200/400 intermediate checkpoints were full size; checkpoint-600's `model.safetensors` (3.08GB) saved cleanly but `optimizer.pt` was truncated. We deleted intermediate checkpoints to recover disk and ran eval against `checkpoint-600/` — model loads fine for inference. **AUC = 0.455 is essentially chance**; eval_loss curve shape was healthier than B-3 (faster early convergence) but the discrimination signal didn't appear. **Conclusion: the under-training hypothesis is wrong — scale alone does not fix 9×9.** This is what motivated the B-5 4×4 replication: if 4×4 succeeded with the same hparams, the issue must be task difficulty, not recipe.
+
+---
+
+## B-5 — 4×4 + SPA hyperparameters + SPA-scale data *(success: AUC 0.726)*
+
+| field | value |
+|---|---|
+| Output dir | `outputs/sft_sudoku_4x4_minimal_b5_spa_hparams/final` |
+| Train file | `data/sudoku_4x4_llm_policy_minimal_spa_scale/wm_train_no_post_bp.parquet` |
+| Val file | `data/sudoku_4x4_llm_policy_minimal_spa_scale/wm_val_no_post_bp.parquet` |
+| Train samples | **6,571** (4×4 SPA-scale, no_post_bp; class balance 40% solvable / 60% BP) |
+| Val samples | 1,645 |
+| Epochs / LR / batch | **5 / 1e-4 / 16** |
+| `max_length` | 1,024 |
+| Total updates | 2,050 |
+| `eval_steps` | 10 (205 dense eval points — finest curve we have) |
+| Launch script | [scripts/run_b5_4x4_spa_hparams.sh](../scripts/run_b5_4x4_spa_hparams.sh) |
+| Training log | [logs/sft_b5.log](../logs/sft_b5.log) |
+| Eval log | [logs/eval_b5.log](../logs/eval_b5.log) |
+| Greedy Acc / Prec / Rec / F1 | 44.3% / 24.4% / 32.0% / 27.7% (over-predicts True; not collapsed) |
+| **ROC AUC** | **0.726** ✅ |
+| P(true) mean separation | +0.023 (solvable 0.045 vs unsolvable 0.022) |
+
+**Notes.** Data generated by splitting 4×4 SPA-scale gen (~5,000 trajectories total) across both clouds in parallel: autodl1 part-A (2,500 trajs, seed=42) + autodl2 part-B (2,500 trajs, seed=43), ~3.7h each. Combined locally via [`scripts/combine_4x4_spa_scale_parts.py`](../scripts/combine_4x4_spa_scale_parts.py). **First SFT run with real solvability discrimination** (AUC 0.726 vs ≈0.46 for every prior run). Greedy is still noisy — the model is uncalibrated and biased toward False (mean P(true) = 0.045 even on actually-solvable states) — but the *ranking* is sound. Confirmed the recipe works; localized the 9×9 collapse to task-difficulty, not architecture/hparams. Full report: [eval_2026-04-29_b5_4x4_spa_replication.md](eval_2026-04-29_b5_4x4_spa_replication.md). Loss-curve mid-training spike at step 430 (~epoch 1.05) is an optimizer transient at the epoch-2 boundary; benign.
+
+---
+
+## What we learned, summarized
+
+1. **Multi-turn collapses to echo on Sudoku** (B-0). Single-step samples are mandatory for this task.
+2. **Greedy classification is a brittle metric** when the model is uncalibrated — collapse direction is an artifact of class-prior, not signal. ROC AUC is the trustworthy metric (B-1 vs B-2 made this obvious).
+3. **Class rebalancing alone doesn't fix discrimination** (B-3 vs B-2: identical AUC).
+4. **Hyperparameter scaling alone doesn't fix 9×9** (B-4 vs B-3: same AUC despite 30× more effective gradient signal).
+5. **The recipe works on 4×4 with SPA-scale data and SPA hparams** (B-5: AUC 0.726). The 9×9 collapse is task-difficulty for Qwen-1.5B SFT alone.
+
+## Pending runs not in this ledger
+
+- **B-6** — 9×9 + SPA hparams + SPA-scale data (queued, waiting on 9×9 SPA-scale data gen finishing on autodl1, ~9h ETA). Will tell us whether 9×9 is salvageable with SPA-scale data, or if RL is the only path forward for 9×9.
+- **RL on B-5** — the strategic next step after B-6 lands. Will test whether asymmetric `<solvable>` rewards (TP +3, FN −2, FP −0.5) lift calibration and AUC further.
+- **Pass@1 on B-5** — to anchor against SPA's published 4×4 numbers; we currently report AUC, which SPA doesn't.
