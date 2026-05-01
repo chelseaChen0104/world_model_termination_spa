@@ -137,8 +137,11 @@ Sources: `logs/eval_b5.log`, `logs/eval_b7.log`.
 |---|---|---|---|---|---|---|---|---|---|---|
 | **Phase 1 v6** | B-5 | 1e-6 | v6 (sb=10) | 200 | 0% | 0% (no lift) | 60.9% | 48.3% (regressed) | 0.005 | ~3h |
 | **Phase 1 v6.1** | B-5 | 1e-5 | v6.1 (sb=3) | 200 | 0% | **6.67% (+6.67pp)** | 60.9% | **62.0%** (recovered) | 0.026 | ~3h |
-| **Run A (continue v6.1)** | v6.1 final | 1e-5 | v6.1 | 500 (in progress) | — | TBA (~step 350+: peak batch solve 50%) | — | — | — | ~5h |
-| **B-7 RL Phase 1** | B-7 | 1e-5 | v6.1 (sb=3) | 200 | 0% | 0% | **100% (init: all-True correct)** | **0% (collapsed all-False)** | **1.7** (huge) | 1h 44m |
+| **Run A (continue v6.1)** | v6.1 final | 1e-5 | v6.1 | 500 | 6.67% | **33.33%** (peak 36.67% @ step 250) | 62.0% | 51.4% (mild regression) | 0.05–0.40 | ~10h |
+| **B-7 RL Phase 1 (v6)** | B-7 | 1e-5 | v6.1 (sb=3) | 200 | 0% | 0% | **100%** (init: all-True correct) | **0%** (collapsed all-False by step 50) | **1.7** | 1h 44m |
+| **B-7 RL Phase 1 (v7)** | B-7 | 1e-5 | v7 (sym + class-bal + progress) | 100 (killed) | 0% | 0% | 100% | **0%** (collapsed by step 75) | 0.65 | ~50m |
+| **B-7 RL Phase 1 (v8, fixed)** | B-7 | 1e-5 | v8 (v7 + viability-tag KL anchor, coef 0.5) | 200 (in flight) | 0% | TBA | 100% | TBA — `via_kl=0` to 6dp through step 25, anchor verified firing on n_via_tokens=32/step | TBA | TBA |
+| **Sudoku v8 anchor** | Run A final | 1e-5 | v8 (anchor on `<solvable>` tag) | 200 (in flight) | 33.33% | TBA — should preserve Pass@1 and lift `solvable_acc` from 0.514 → ~0.95 | 51.4% | TBA | TBA | ~3-4h |
 
 ### 4.2 Phase 1 v6.1 (Sudoku, success run) — quartile trajectory
 
@@ -279,6 +282,13 @@ For the paper's results section, organized by claim:
 - Evidence: v6 (success_bonus=10) on 4×4 Sudoku had calibration regression and 0% Pass@1 lift. v6.1 (success_bonus=3) recovered calibration AND lifted Pass@1 to 6.67%. The reduced bonus shifted relative weight back to per-step calibration. (§4.1, §4.2.)
 - B-7 with v6.1 also failed because its solve rate was 0% — bonus magnitude is moot when it never fires.
 
+### Claim 7: The calibration regression in our RL setup is *dynamic drift*, not a static reward-landscape problem; a tag-specific KL anchor is the targeted fix.
+- Evidence (§9.2 sanity test): under v7 reward magnitudes, the static expected per-step reward ranks `oracle (+1.00) > sft_actual (+0.99) > always_false (+0.46) > always_true (-0.46)` — the reward landscape favors correct prediction. B-7 SFT starts at oracle quality (98% accuracy on its rollout state distribution).
+- The collapse is therefore a *dynamic* failure of the optimizer: noisy GRPO advantages walk the policy off the SFT optimum faster than the global KL leash (averaged over ~150 response tokens, kl_coef=0.05) can pull it back. Once off-manifold, the policy falls into the always-False basin and the local gradient keeps it there.
+- The fix (v8 reward) adds an auxiliary KL penalty applied *only on the `<viability>` / `<solvable>` tag content tokens* against the frozen SFT reference, with coefficient 0.5. Concentrated on the 1-3 tokens that matter for calibration, it's much stronger per-token than the global KL while leaving action tokens free to optimize.
+- Implementation correctness was non-trivial: a tokenization roundtrip mismatch (trailing EOS) caused the position finder to silently no-op for ~100 steps before it was caught. The fix re-decodes `response_ids` ourselves and tolerates trailing-EOS mismatches via prefix matching. Positions are now cached on `StepRecord.viability_token_positions` at rollout time.
+- v8-fixed early signals (step 50, in flight at time of writing): `via_kl = 0.000000` to 6 decimal places (anchor effective), `solvable_acc` held at 1.0 through the v6 collapse point. Step 75 (v7 collapse point) and Sudoku Run A v8 anchor are the two active discriminating tests. ([qa_2026-05-01_reward_and_rl.md](qa_2026-05-01_reward_and_rl.md), [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md) "Option D".)
+
 ---
 
 ## 8. Caveats and limitations to acknowledge
@@ -303,23 +313,33 @@ To get ahead of reviewer questions:
 
 What's done is in §3-§5. What's needed to make the paper publishable, in priority order:
 
-### 9.1 Currently in flight
+### 9.1 Currently in flight (2026-05-01)
 
 | Experiment | Cloud | Status | When it lands | What it gives the paper |
 |---|---|---|---|---|
-| **Run A: continue v6.1, 500 steps, lr=1e-5** | autodl2 | Step 350+/500 (last seen) | ~3 hours | Whether longer RL pushes Pass@1 from 6.67% toward 30-50%. Resolves whether v6.1's 6.67% was a starting plateau or a real ramp. Critical for Claim 4. |
+| **B-7 v8-fixed RL (Pentomino calibration anchor)** | autodl | Step 50/200, `via_kl = 0.000000` to 6dp throughout, `solvable_acc = 1.0` at step 25 | ~3 hours | Whether the viability-tag KL anchor prevents the dynamic calibration drift identified in §4.4. Sharp prediction: anchor holds `solvable_acc ≥ 0.95` (matches B-7 SFT). |
+| **Sudoku v8 anchor on Run A's checkpoint** | autodl2 | Just launched | ~3-4 hours | Cleanest test of v8 on a *known-working* baseline (Run A: Pass@1 33.33%, but `solvable_acc` regressed 0.620 → 0.514). Hypothesis: anchor restores `solvable_acc` to ~0.95 *without* losing Pass@1. If yes, this is the paper's "calibration anchor compatible with goal-directed RL" headline. |
 
-### 9.2 Imminent next runs (1-2 day budget)
+### 9.2 Recently completed (2026-04-30 → 2026-05-01)
+
+| Experiment | Result | Paper implication |
+|---|---|---|
+| **Run A (Sudoku continuation, lr=1e-5, 500 steps)** | Pass@1 6.67% → **33.33%** (peak 36.67% @ step 250); `solvable_acc` 0.620 → 0.514 (mild regression); `bp_recall = 1.000` throughout | Confirms lr was the original Sudoku bottleneck, not the reward shape. The 0.514 acc is "essentially chance on borderline solvable states" — but `bp_recall = 1.0` and `Prec(False) = 0.38` shows the failure is asymmetric (perfect recall on doom, high false-positive on solvable). Motivates Phase 3 v8 anchor experiment. |
+| **B-7 sanity test (400 rollouts at T=0.7)** | 73% 1-step rollouts, 0% Pass@1 (success_bonus never fires), B-7 SFT calibration is essentially oracle (98% acc), v7 reward landscape has oracle (+1.00) >> always_false (+0.46) | Proves the v6/v7 collapse is **dynamic drift**, not a static reward landscape problem. The cure has to be a leash on the calibration tokens, not a reward redesign. |
+| **B-7 v8 (first attempt, broken anchor)** | Anchor silently no-op'd due to tokenization roundtrip mismatch (returned [] every call); calibration collapsed at step 75 just like v7 | Bug discovery + fix documented in [src/training/rl_trainer_v6.py](../src/training/rl_trainer_v6.py): re-decode `response_ids` ourselves and tolerate trailing-EOS mismatch via prefix matching. Cache positions on `StepRecord.viability_token_positions` at rollout time. |
+
+### 9.3 Imminent next runs (1-2 day budget)
 
 These are blocking for a *complete* paper:
 
 | Run | Effort | What it tests / fixes | Paper section it informs |
 |---|---|---|---|
-| **B-7 Pass@1 measurement** | ~30 min GPU on autodl1 | SPA-comparable headline number for Pentomino. Currently we have AUC but no Pass@1. | §3.1 table; cross-env story |
+| **B-7 Pass@1 measurement** | ~30 min GPU on autodl | SPA-comparable headline number for Pentomino. Currently we have AUC but no Pass@1. | §3.1 table; cross-env story |
 | **B-7 train↔val (s_t, a_t) overlap check** | ~10 min CPU | Disambiguates memorization vs generalization for the AUC=1.0 result. Reduces reviewer attack surface. | §8 caveats; §3.1 footnote |
-| **B-7 RL with v7 reward (5×4, 200 steps)** | ~4-5 hours GPU on autodl1 | **First-line fix** for the B-7 collapse: same env, redesigned reward. v7 = symmetric magnitudes (TP=TN=+1.0, FN=FP=−1.0) + per-batch inverse-frequency class balancing + per-valid-step progress bonus (0.1). Targets the three failure mechanisms identified in §4.4: (a) per-class asymmetry biased toward False, (b) doom-state samples dominate gradient (~90% of steps), (c) no incentive to find non-doom actions. If v7 converges (greedy `<viability>` acc stays > 0.9, Pass@1 lifts off 0%) → recipe is reward-engineerable for short-horizon envs and the bigger-board run becomes optional. If v7 ALSO collapses → trajectory-length distribution is the irreducible bottleneck, motivating B-9. | §4.4 mitigation; new "reward design for short-horizon termination RL" sub-claim |
-| **B-9: 5×5/5-piece Pentomino — full pipeline** *(fallback if v7 fails)* | ~1 day total (data gen + SFT + RL) | Run only if v7 also collapses on 5×4. Tests whether the failure is reward-shape-fixable (then v7 should help on 5×5 too) or trajectory-length-driven (then 5×5's longer rollouts ought to fix it even with v6.1). Either outcome validates §4.4 by elimination. | §4.4 mechanism + Claim 4 evidence (only needed if v7 doesn't resolve B-7) |
-| **Phase 2 truncation experiment on B-7** | ~3-4 hours GPU | The project's headline value proposition: does early termination via `<viability>` actually save GPU-hours during RL? Set τ=0.10, count rollouts terminated early, measure compute savings vs no-truncation baseline. **Without this, "compute savings via termination" is a claim, not a finding.** | New §X: "Compute savings from threshold-based truncation" — likely a key paper figure |
+| **B-7 v8-fixed RL (in flight)** | already running | If `solvable_acc ≥ 0.95` AND Pass@1 lifts off 0% → recipe works on Pentomino too. If acc holds but Pass@1 stays 0% → calibration anchor alone is insufficient; flip on `--action-quality-bonus 1.0` (already wired into the trainer) for a v8 + v8.1 combined run. If acc drops too → anchor mechanism flawed; escalate to B-9 bigger board. | §4.4 mitigation. |
+| **Sudoku v8 anchor on Run A (in flight)** | already running | The cleanest decoupled test. Validates the anchor on a known-working setup. | §4.4 + new "calibration-preserving RL" sub-claim. |
+| **B-9: 5×10/10-piece Pentomino — full pipeline** *(fallback if v8 also fails Pass@1 lift on B-7)* | ~1 day total (data gen + SFT + RL) | Switched from the originally-proposed 5×5/5-piece variant. Bigger predictive challenge, longer trajectory length distribution, and `success_bonus` should fire on at least some rollouts (unlike Pentomino-easy where Pass@1 stochastic = 0/400). P-0 sweep on 66 (10-of-12) subsets in progress on local. | §4.4 mechanism + Claim 4 evidence by elimination |
+| **Phase 2 truncation experiment** | ~3-4 hours GPU | The project's headline value proposition: does early termination via `<viability>` actually save GPU-hours during RL? Run on Sudoku v8 anchor's final checkpoint (need `Prec(False) ≥ 0.90` from anchor — Run A's 0.38 wasn't enough). | New §X: "Compute savings from threshold-based truncation" — likely a key paper figure |
 
 ### 9.3 Higher-effort follow-ups (paper-strengthening but not blocking)
 

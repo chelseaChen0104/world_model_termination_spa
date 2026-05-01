@@ -118,6 +118,13 @@ class RLConfig:
     # anchor applies the same total pressure regardless of how the tag tokenizes.
     # Set to 0.0 to disable.
     viability_kl_coef: float = 0.0
+    # v8.1 / fallback — direct action-quality reward, separate from viability prediction.
+    # +action_quality_bonus on every step where action_was_valid AND next_state is
+    # solvable; -action_quality_bonus when next_state is doom. This adds a gradient
+    # signal that *directly* prefers non-doom actions, independent of how well the
+    # model predicts viability afterward. Use if v8's viability-KL anchor stabilizes
+    # calibration but Pass@1 doesn't lift. Composable: works alongside v6/v7/v8.
+    action_quality_bonus: float = 0.0
 
     # Eval / save
     eval_every: int = 50
@@ -162,35 +169,47 @@ _re_viability_or_solvable = re.compile(
 )
 
 
-def find_viability_token_positions(tokenizer, response_text: str, response_ids: list) -> list:
+def find_viability_token_positions(tokenizer, response_ids: list) -> list:
     """Return token indices in `response_ids` that fall inside <viability>...</viability>
     (or <solvable>...</solvable>) — specifically, the positions of the "true"/"false"
     content. Used by the v8 viability-tag KL anchor.
 
-    Implementation: find the char span of the tag content via regex, then re-tokenize
-    `response_text` with offset_mapping (fast tokenizer) to map char span → token span.
-    Returns [] if no tag is present, the regex doesn't match, or the re-tokenization
-    length disagrees with `response_ids` (rare tokenization roundtrip mismatch).
+    Strategy: re-decode `response_ids` ourselves (so the text is by-construction
+    consistent with the IDs), find the regex char span on that decoded text, then
+    re-tokenize that same text with offset_mapping to map char span → token span.
+    The re-tokenized IDs may be shorter than `response_ids` because of trailing
+    EOS/pad/special tokens; we tolerate that by treating the re-tokenized output
+    as a prefix when the leading tokens match.
 
-    The tradeoff with using offset_mapping: it requires a HF "fast" tokenizer. Qwen2.5
-    is fast, but if a future model isn't we'd need a fallback. For now we just return []
-    on any inconsistency rather than risk masking the wrong tokens.
+    Returns [] if no tag is present, the regex doesn't match, or the re-tokenized
+    sequence disagrees with `response_ids` in ways we can't safely reconcile.
     """
-    m = _re_viability_or_solvable.search(response_text)
+    if not response_ids:
+        return []
+    # Re-decode to guarantee text↔ids correspondence (the passed-in `response_text`
+    # may have been decoded differently, e.g., with skip_special_tokens=True, which
+    # is what tripped the original implementation).
+    decoded = tokenizer.decode(response_ids, skip_special_tokens=True)
+    m = _re_viability_or_solvable.search(decoded)
     if not m:
         return []
     char_start, char_end = m.start(1), m.end(1)
     try:
-        enc = tokenizer(response_text, return_offsets_mapping=True, add_special_tokens=False)
+        enc = tokenizer(decoded, return_offsets_mapping=True, add_special_tokens=False)
     except (TypeError, NotImplementedError):
         return []  # slow tokenizer, no offset mapping
     re_ids = enc["input_ids"]
     re_offsets = enc["offset_mapping"]
-    if len(re_ids) != len(response_ids):
-        # Tokenization roundtrip mismatch (extremely rare with bf16 sampled responses).
-        # Skip the anchor on this step rather than risk masking the wrong tokens.
-        return []
-    return [i for i, (s, e) in enumerate(re_offsets) if s < char_end and e > char_start]
+    # Tolerate trailing-token mismatch: the original response_ids commonly includes
+    # an EOS token that gets stripped during decode→re-encode. As long as the
+    # re-tokenized ids match response_ids on the common prefix, the offsets we
+    # compute are still valid token indices in the original response_ids.
+    n_match = min(len(re_ids), len(response_ids))
+    if any(re_ids[i] != response_ids[i] for i in range(n_match)):
+        return []  # genuine content mismatch, can't trust offsets
+    positions = [i for i, (s, e) in enumerate(re_offsets[:n_match])
+                 if s < char_end and e > char_start]
+    return positions
 
 
 def parse_action(text: str) -> Optional[tuple]:
@@ -238,7 +257,11 @@ class StepRecord:
     calib_reward: float = 0.0
     fmt_reward: float = 0.0
     progress_reward: float = 0.0
+    action_quality_reward: float = 0.0   # v8.1: ±action_quality_bonus by GT next-state
     action_was_valid: bool = False
+    # v8: cached at rollout time so the PPO update doesn't have to re-tokenize.
+    # Indices into `response_ids` of the <viability>/<solvable> content tokens.
+    viability_token_positions: list = field(default_factory=list)
 
 
 @dataclass
@@ -321,12 +344,14 @@ def do_rollout(
         if action is None:
             # Unparseable action — give worst-case step reward and stop.
             calib_r = cfg.fn_reward
+            via_pos = find_viability_token_positions(tokenizer, response_ids)
             steps.append(StepRecord(
                 prompt_text=prompt_text, response_text=response_text, response_ids=response_ids,
                 action=None, pred_solvable=pred, gt_solvable=False, is_breaking_point=False,
                 step_reward=calib_r + fmt_r, old_logps=old_logps,
                 calib_reward=calib_r, fmt_reward=fmt_r, progress_reward=0.0,
                 action_was_valid=False,
+                viability_token_positions=via_pos,
             ))
             break
 
@@ -338,13 +363,17 @@ def do_rollout(
         is_solved = bool(info.get("success", False))
         calib_r = solvable_reward(pred, gt_solvable, cfg)
         progress_r = cfg.progress_bonus_per_step  # valid action that advanced trajectory
+        action_q_r = cfg.action_quality_bonus * (1.0 if gt_solvable else -1.0)
+        via_pos = find_viability_token_positions(tokenizer, response_ids)
 
         steps.append(StepRecord(
             prompt_text=prompt_text, response_text=response_text, response_ids=response_ids,
             action=action, pred_solvable=pred, gt_solvable=gt_solvable, is_breaking_point=is_bp,
-            step_reward=calib_r + fmt_r + progress_r, old_logps=old_logps,
+            step_reward=calib_r + fmt_r + progress_r + action_q_r, old_logps=old_logps,
             calib_reward=calib_r, fmt_reward=fmt_r, progress_reward=progress_r,
+            action_quality_reward=action_q_r,
             action_was_valid=True,
+            viability_token_positions=via_pos,
         ))
         history.append((obs, response_text))
         obs = next_obs
@@ -513,12 +542,14 @@ def do_rollouts_batched(
             # If extraction failed (no <answer> tag), fall back to a sentinel that the env will reject.
             if not action_str:
                 calib_r = cfg.fn_reward
+                via_pos = find_viability_token_positions(tokenizer, response_ids)
                 r["steps"].append(StepRecord(
                     prompt_text=prompt_text, response_text=text, response_ids=response_ids,
                     action=None, pred_solvable=pred, gt_solvable=False, is_breaking_point=False,
                     step_reward=calib_r + fmt_r, old_logps=old_logps,
                     calib_reward=calib_r, fmt_reward=fmt_r, progress_reward=0.0,
                     action_was_valid=False,
+                    viability_token_positions=via_pos,
                 ))
                 r["alive"] = False
                 continue
@@ -530,15 +561,20 @@ def do_rollouts_batched(
             is_solved = bool(info.get("success", False))
             calib_r = solvable_reward(pred, gt_solvable, cfg) if action_was_valid else cfg.fn_reward
             progress_r = cfg.progress_bonus_per_step if action_was_valid else 0.0
+            action_q_r = (cfg.action_quality_bonus * (1.0 if gt_solvable else -1.0)
+                          if action_was_valid else 0.0)
+            via_pos = find_viability_token_positions(tokenizer, response_ids)
 
             r["steps"].append(StepRecord(
                 prompt_text=prompt_text, response_text=text, response_ids=response_ids,
                 action=action_str if action_was_valid else None,
                 pred_solvable=pred, gt_solvable=gt_solvable, is_breaking_point=is_bp,
-                step_reward=calib_r + fmt_r + progress_r,
+                step_reward=calib_r + fmt_r + progress_r + action_q_r,
                 old_logps=old_logps,
                 calib_reward=calib_r, fmt_reward=fmt_r, progress_reward=progress_r,
+                action_quality_reward=action_q_r,
                 action_was_valid=bool(action_was_valid),
+                viability_token_positions=via_pos,
             ))
             r["history"].append((r["obs"], text))
             r["obs"] = next_obs
@@ -603,7 +639,8 @@ def rebalance_rewards(rollouts: list, cfg: RLConfig) -> dict:
                 continue
             w = w_solv if s.gt_solvable else w_doom
             s.calib_reward = float(s.calib_reward) * w
-            s.step_reward = s.calib_reward + s.fmt_reward + s.progress_reward
+            s.step_reward = (s.calib_reward + s.fmt_reward
+                             + s.progress_reward + s.action_quality_reward)
         ro.final_reward = sum(s.step_reward for s in ro.steps)
         ro.final_reward += cfg.success_bonus if ro.is_solved else cfg.fail_bonus
 
@@ -734,9 +771,13 @@ def ppo_update(
             via_kl_step = 0.0
             n_via = 0
             if cfg.viability_kl_coef > 0.0:
-                via_idx = find_viability_token_positions(
-                    tokenizer, step.response_text, step.response_ids[:min_len]
-                )
+                # Prefer the positions cached at rollout time (cheaper, more reliable).
+                # Fall back to re-deriving from the response if absent (legacy rollouts).
+                via_idx = step.viability_token_positions
+                if not via_idx:
+                    via_idx = find_viability_token_positions(tokenizer, step.response_ids)
+                # Constrain to the truncated logp range
+                via_idx = [i for i in via_idx if i < min_len]
                 if via_idx:
                     idx_t = torch.tensor(via_idx, device=device, dtype=torch.long)
                     new_via = new_logp.index_select(0, idx_t)
@@ -854,6 +895,10 @@ def main():
     p.add_argument("--viability-kl-coef", type=float, default=None,
                    help="Coefficient on the per-step viability-tag KL anchor. "
                         "Defaults: v6/v7=0.0, v8=0.5.")
+    p.add_argument("--action-quality-bonus", type=float, default=None,
+                   help="Per-step action-quality reward magnitude. "
+                        "Adds +bonus on action→solvable, -bonus on action→doom. "
+                        "Composable with any reward version. Default 0.0 (off).")
     args = p.parse_args()
 
     cfg = RLConfig(
@@ -889,6 +934,10 @@ def main():
         cfg.viability_kl_coef = 0.5 if args.viability_kl_coef is None else args.viability_kl_coef
     elif args.viability_kl_coef is not None:
         cfg.viability_kl_coef = args.viability_kl_coef
+
+    # Action-quality reward — composable with any reward version (default 0.0 = off).
+    if args.action_quality_bonus is not None:
+        cfg.action_quality_bonus = args.action_quality_bonus
 
     # Setup
     os.makedirs(cfg.output_dir, exist_ok=True)

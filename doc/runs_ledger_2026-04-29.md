@@ -210,12 +210,47 @@ Common across all runs:
 5. **The recipe works on 4×4 with SPA-scale data and SPA hparams** (B-5: AUC 0.726). The 9×9 collapse is task-difficulty for Qwen-1.5B SFT alone.
 6. **The recipe transfers cross-env** (B-7 pentomino-easy: AUC 1.000). Pentomino's predictive gap is sharper (visually local) and yields stronger discrimination than 4×4 Sudoku — even with less than half the training data.
 
-## Pending runs not in this ledger
+## Pending and recently completed runs (post-2026-04-30)
 
-- **B-6** — 9×9 + SPA hparams + SPA-scale data (paused; 9×9 SPA-scale gen completed easy difficulty only, medium+hard skipped per pause request).
-- **Phase 1 v6.1 RL on B-5** — completed, lifted Pass@1 from 0% → 6.67%; full report pending (the v6.1 success_bonus reduction also fixed the calibration regression seen in v6).
-- **Run A (continuation)** — currently running on autodl2, lr=1e-5, 500 more steps from v6.1 checkpoint. At step 350+: 50% per-batch solve rate; ~3 more hours.
-- **Run B (lr=1e-4 from B-5)** — staged on local, not yet launched on autodl1 (would need to push B-5 weights up).
-- **RL on B-7** — **completed on 2026-04-30, but result is a regression**. v6 reward + 1-step rollout bias → calibration collapsed (greedy `<viability>` flipped True→False). Pass@1 stayed 0%. See [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md). **B-7 SFT (AUC=1.000) remains the canonical pentomino model**; the B-7 RL checkpoint is deprecated.
-- **Pass@1 on B-7** — needed to anchor pentomino results against a solving metric.
-- **B-9 (proposed)** — 5×5 with 5 pieces (P-0 sweep showed `{I, L, P, W, Y}` has 80 tilings, 4× more variety than 5×4's 20). Would address the trajectory-length-distribution issue that broke B-7 RL. ~1 day of work.
+### Recently completed
+
+- **Phase 1 v6.1 RL on B-5** — completed, lifted Pass@1 from 0% → 6.67% at lr=1e-6; the v6.1 success_bonus reduction (10→3) also dampened (but did not eliminate) the v6 calibration regression. Output: `outputs/rl_b5_phase1_v6_1/final`.
+
+- **Run A (Sudoku continuation)** — completed 2026-05-01 on autodl2. Continued from v6.1 endpoint at **lr=1e-5** (10× the original) for 500 more steps. **Pass@1: 6.67% → 33.33%** (peak 36.67% at step 250); bp_recall held at 1.000 throughout; `solvable_acc` drifted 0.620 → 0.514 (mild calibration regression — same direction as v6 Pentomino but much slower). Headline finding: **lr was the bottleneck, not the reward shape, on Sudoku.** Output: `outputs/rl_b5_phase2_continue/final`. Eval trajectory:
+  | step | Pass@1 | solvable_acc | bp_recall |
+  |---|---|---|---|
+  | 0 (= v6.1 endpoint) | 6.67% | 0.620 | 1.000 |
+  | 50 | 26.67% | 0.609 | 1.000 |
+  | 250 | **36.67% (peak)** | 0.467 | 1.000 |
+  | 500 (final) | 33.33% | 0.514 | 1.000 |
+
+- **B-7 RL Phase 1 (v6, deprecated)** — completed 2026-04-30 with calibration collapse. v6 reward + 1-step rollout bias on Pentomino-easy → greedy `<viability>` flipped True→False between steps 25 and 50. Pass@1 stayed 0%. See [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md). B-7 SFT (AUC=1.000) remains the canonical pentomino model. Failed checkpoint at `outputs/rl_b7_phase1/final` (do not deploy).
+
+- **B-7 RL Phase 1 (v7, partial mitigation)** — completed 2026-05-01. v7 = symmetric magnitudes + class balance + progress bonus delayed the collapse from step ~50 to step ~75 but did not prevent it. Calibration still flipped to all-False by step 75. Output: `outputs/rl_b7_phase1_v7/final` (deprecated).
+
+- **B-7 sanity test** — 2026-04-30. 400 rollouts at T=0.7 to characterize the empirical conditions driving the v6/v7 collapse. Findings:
+  - Rollout length: 73% are 1-step, 27% are 2-step, **0% reach step 3+**.
+  - Pass@1 stochastic: **0/400** — `success_bonus` literally never fires.
+  - B-7 SFT calibration on its rollout distribution: 98.0% accuracy, 26.3% predicted-True vs 27.0% true class rate (essentially oracle).
+  - Counterfactual under v7: oracle = +1.00, sft_actual = +0.99, always_false = +0.46, always_true = −0.46. **The reward landscape favors correct prediction by a wide margin** — collapse is dynamic drift, not the static optimum.
+  See [sanity_2026-04-30_b7_rollout_stats.json](sanity_2026-04-30_b7_rollout_stats.json) and the analysis in [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md).
+
+### v8 reward + the implementation bug (caught 2026-05-01)
+
+v8 = v7 + auxiliary KL anchor on `<viability>`/`<solvable>` tag tokens against the frozen ref policy (default coef 0.5). Targets the dynamic calibration drift identified in the sanity test.
+
+**First v8 attempt (autodl, 2026-05-01)** — ran for ~100 steps before being killed. Calibration collapsed at step 75 just like v7. Investigation revealed the position-finder function returned `[]` on every call (`n_via_tokens = 0` per step in JSONL), so the anchor was never actually applied — it was effectively v7. Root cause: tokenization roundtrip mismatch. `response_ids` includes a trailing EOS token that gets stripped during decode→re-tokenize, so the length check returned [] and the anchor silently no-op'd.
+
+**Fix** — re-decode `response_ids` ourselves (so the text we tokenize comes from the IDs, not from the upstream `response_text` which was decoded with `skip_special_tokens=True`), then accept length mismatches as long as the prefix tokens match. Also cache the positions on `StepRecord.viability_token_positions` at rollout time so the PPO update doesn't have to re-derive them. See [src/training/rl_trainer_v6.py](../src/training/rl_trainer_v6.py).
+
+**Second v8 attempt (autodl, 2026-05-01, in flight)** — relaunched after the fix. JSONL confirms the anchor now fires: `n_via_tokens = 32` per step (= one `<viability>` token per rollout × 32 rollouts). `via_kl = 0.000000` to 6 decimal places through step 25 — the anchor is fully effective at holding viability tokens at SFT logprobs. Step 25 eval: `solvable_acc = 1.0`. Step 50 (v6 collapse point) and step 75 (v7 collapse point) are the discriminating tests still ahead.
+
+**Sudoku v8 anchor experiment (autodl2, 2026-05-01, in flight)** — applies the v8 anchor to Run A's final checkpoint. Hypothesis: the anchor should restore `solvable_acc` from 0.514 → ~0.95 without losing the 33% Pass@1. Validates v8 on a working setup, decoupled from Pentomino's "Pass@1 stuck at 0%" confound. Output: `outputs/rl_b5_phase3_v8_anchor/`. Launcher: [scripts/run_rl_b5_phase3_v8.sh](../scripts/run_rl_b5_phase3_v8.sh).
+
+### Pending / proposed (not yet started)
+
+- **Run B (lr=1e-4 from B-5)** — **dropped.** Run A's lr=1e-5 already lifted Pass@1 to ~33%; lr=1e-4 risks blowing past the trust region with marginal upside.
+- **B-6** — 9×9 + SPA hparams + SPA-scale data (paused; 9×9 SPA-scale gen completed easy difficulty only).
+- **B-7 Pass@1 measurement** — measure greedy Pass@1 on B-7 SFT to anchor pentomino results against a solving metric.
+- **B-9 (5×10 / 10-piece pentomino)** — replaces the previously-proposed 5×5 variant. P-0 sweep on 66 (10-of-12) subsets in progress on local. Targets the trajectory-length distribution that drives the B-7 collapse mechanism. ~1 day of work after subset is locked.
+- **Phase 2 truncation experiment on Sudoku Run A's checkpoint** — would test the headline value claim (compute savings via early termination). Requires v8 anchor (in flight) to lift Prec(False) above the truncation gate threshold (current Run A Prec(False) = 0.38, gate = 0.90).
