@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import re
@@ -262,6 +263,10 @@ class StepRecord:
     # v8: cached at rollout time so the PPO update doesn't have to re-tokenize.
     # Indices into `response_ids` of the <viability>/<solvable> content tokens.
     viability_token_positions: list = field(default_factory=list)
+    # Phase 2 truncation: True if the rollout was terminated *here* by the
+    # truncation gate (model said False with high confidence). Used to count
+    # rollouts truncated early for the compute-savings experiment.
+    truncated_early: bool = False
 
 
 @dataclass
@@ -378,11 +383,16 @@ def do_rollout(
         history.append((obs, response_text))
         obs = next_obs
 
-        # Phase 2 (truncation_mode=conservative): would terminate here on high-confidence False.
-        # Phase 1 leaves truncation_mode='off' so this never fires.
-        if cfg.truncation_mode == "conservative" and pred is False:
-            # NOTE: needs P(false) > truncation_threshold from a teacher-forced pass; not wired up yet.
-            pass
+        # Phase 2 truncation gate — same logic as do_rollouts_batched (see there
+        # for full comment). Only fires under truncation_mode='conservative'.
+        if (cfg.truncation_mode == "conservative"
+                and pred is False and not is_solved and not done
+                and via_pos and old_logps
+                and via_pos[0] < len(old_logps)):
+            false_logp = old_logps[via_pos[0]]
+            if false_logp > math.log(max(cfg.truncation_threshold, 1e-12)):
+                steps[-1].truncated_early = True
+                break
 
         if done:
             break
@@ -579,6 +589,24 @@ def do_rollouts_batched(
             r["history"].append((r["obs"], text))
             r["obs"] = next_obs
             r["is_solved"] = r["is_solved"] or is_solved
+
+            # Phase 2 truncation gate (per doc/plan_2026-05-01_truncation_experiment.md):
+            # If the truncation_mode is "conservative" AND the model said
+            # <viability>/<solvable>=False with high confidence (logp(false_token) >
+            # log(truncation_threshold), where threshold ∈ (0, 1) is interpreted as
+            # a probability lower bound on the sampled false token), terminate the
+            # rollout here to save compute. Doesn't fire on winning trajectories or
+            # already-terminated rollouts. The step that triggered truncation IS
+            # included in the rollout (so the gradient still sees this prediction).
+            if (cfg.truncation_mode == "conservative"
+                    and pred is False and not is_solved and not done
+                    and action_was_valid
+                    and via_pos and old_logps
+                    and via_pos[0] < len(old_logps)):
+                false_logp = old_logps[via_pos[0]]
+                if false_logp > math.log(max(cfg.truncation_threshold, 1e-12)):
+                    r["steps"][-1].truncated_early = True
+                    r["alive"] = False
 
             if done or not action_was_valid:
                 r["alive"] = False
@@ -899,6 +927,14 @@ def main():
                    help="Per-step action-quality reward magnitude. "
                         "Adds +bonus on action→solvable, -bonus on action→doom. "
                         "Composable with any reward version. Default 0.0 (off).")
+    # Phase 2 truncation gate
+    p.add_argument("--truncation-mode", default=None, choices=["off", "conservative"],
+                   help="Phase 2 truncation gate. 'conservative' truncates rollouts "
+                        "when the model emits <viability>/<solvable>=False with logp "
+                        "above log(--truncation-threshold). Default 'off'.")
+    p.add_argument("--truncation-threshold", type=float, default=None,
+                   help="Probability threshold for the truncation gate. "
+                        "Truncates if logp(false_token) > log(threshold). Default 0.95.")
     args = p.parse_args()
 
     cfg = RLConfig(
@@ -938,6 +974,12 @@ def main():
     # Action-quality reward — composable with any reward version (default 0.0 = off).
     if args.action_quality_bonus is not None:
         cfg.action_quality_bonus = args.action_quality_bonus
+
+    # Phase 2 truncation gate — composable with any reward version (default off).
+    if args.truncation_mode is not None:
+        cfg.truncation_mode = args.truncation_mode
+    if args.truncation_threshold is not None:
+        cfg.truncation_threshold = args.truncation_threshold
 
     # Setup
     os.makedirs(cfg.output_dir, exist_ok=True)
@@ -1021,6 +1063,13 @@ def main():
         rewards = np.array([r.final_reward for r in rollouts])
         solved_rate = sum(1 for r in rollouts if r.is_solved) / len(rollouts)
 
+        # Phase 2 truncation experiment metrics: how many rollouts got truncated
+        # early, and what's the average rollout length (savings proxy).
+        n_truncated_early = sum(1 for r in rollouts
+                                if any(s.truncated_early for s in r.steps))
+        total_response_tokens = sum(len(s.response_ids) for r in rollouts for s in r.steps)
+        mean_rollout_len = float(np.mean([len(r.steps) for r in rollouts]))
+
         advs = grpo_advantages(rollouts, cfg.group_size)
 
         # PPO update (multiple epochs over the same rollouts)
@@ -1034,6 +1083,9 @@ def main():
             "rollout_time_s": round(rollout_time, 1),
             "step_time_s": round(elapsed, 1),
             "n_rollouts": len(rollouts),
+            "n_truncated_early": int(n_truncated_early),
+            "total_response_tokens": int(total_response_tokens),
+            "mean_rollout_len": round(mean_rollout_len, 2),
             "reward_mean": float(rewards.mean()),
             "reward_std": float(rewards.std()),
             "solved_rate": float(solved_rate),
