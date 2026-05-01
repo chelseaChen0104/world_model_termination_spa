@@ -20,19 +20,21 @@ cd /root/autodl-tmp/world_model_termination_spa
 
 N_TOTAL_STEPS=${N_TOTAL_STEPS:-200}
 SFT_PATH=${SFT_PATH:-outputs/sft_pentomino_easy_b7_spa_hparams/final}
-# v7 RL gets a fresh output dir to avoid overwriting the v6 (deprecated) checkpoint.
-OUTPUT_DIR=${OUTPUT_DIR:-outputs/rl_b7_phase1_v7}
+# v8 RL gets a fresh output dir; v7 (deprecated, partial-collapse) lives at outputs/rl_b7_phase1_v7/
+OUTPUT_DIR=${OUTPUT_DIR:-outputs/rl_b7_phase1_v8}
 N_PUZZLES_PER_BATCH=${N_PUZZLES_PER_BATCH:-4}
 GROUP_SIZE=${GROUP_SIZE:-8}
 LR=${LR:-1e-5}
 KL_COEF=${KL_COEF:-0.05}
 EVAL_EVERY=${EVAL_EVERY:-25}
 SEED=${SEED:-42}
-# v7 reward is the default for Pentomino — fixes B-7 v6 collapse from short rollouts.
-# Override with REWARD_VERSION=v6 to reproduce the prior (failed) baseline.
-REWARD_VERSION=${REWARD_VERSION:-v7}
+# v8 = v7 + viability-tag KL anchor. Targets the dynamic calibration drift the
+# sanity test 2026-04-30 identified as the actual collapse mechanism.
+# Override REWARD_VERSION=v7 or v6 to reproduce earlier baselines.
+REWARD_VERSION=${REWARD_VERSION:-v8}
 PROGRESS_BONUS=${PROGRESS_BONUS:-0.1}
 CLASS_BALANCE_CAP=${CLASS_BALANCE_CAP:-5.0}
+VIABILITY_KL_COEF=${VIABILITY_KL_COEF:-0.5}
 
 mkdir -p "$OUTPUT_DIR"
 LOG=logs/rl_b7_phase1.log
@@ -50,9 +52,10 @@ echo "  Group size:        $GROUP_SIZE  (rollouts/puzzle)"
 echo "  Effective batch:   $((N_PUZZLES_PER_BATCH * GROUP_SIZE)) rollouts/step"
 echo "  Learning rate:     $LR"
 echo "  KL coefficient:    $KL_COEF"
-echo "  Reward version:    $REWARD_VERSION (v7 = symmetric + class-balanced + progress bonus)"
-echo "  Progress bonus:    $PROGRESS_BONUS per valid step (v7 only)"
-echo "  Class-balance cap: $CLASS_BALANCE_CAP (v7 only)"
+echo "  Reward version:    $REWARD_VERSION (v8 = v7 + viability-tag KL anchor)"
+echo "  Progress bonus:    $PROGRESS_BONUS per valid step (v7/v8 only)"
+echo "  Class-balance cap: $CLASS_BALANCE_CAP (v7/v8 only)"
+echo "  Viability KL coef: $VIABILITY_KL_COEF (v8 only — locks calibration to SFT)"
 echo "  Eval every:        $EVAL_EVERY steps (Pass@1 greedy on 30 puzzles)"
 echo "============================================================"
 
@@ -72,6 +75,7 @@ bash scripts/_run_with_env.sh python -u src/training/rl_trainer_v6.py \
     --reward-version "$REWARD_VERSION" \
     --progress-bonus "$PROGRESS_BONUS" \
     --class-balance-cap "$CLASS_BALANCE_CAP" \
+    --viability-kl-coef "$VIABILITY_KL_COEF" \
     2>&1 | tee "$LOG"
 
 echo

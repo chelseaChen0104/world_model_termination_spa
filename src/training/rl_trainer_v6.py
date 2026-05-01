@@ -14,25 +14,25 @@ v6 reward (per rollout = full puzzle attempt):
   end-of-trajectory:
     +3.0 if env.is_solved else 0.0  (v6.1: down from +10)
 
-v7 reward — designed to fix the B-7 Pentomino collapse mode (see
-doc/eval_2026-04-30_b7_rl_phase1.md). When 90% of rollouts terminate in 1 step
-(doom-state-dominated), v6's TP=+1.0 / TN=+0.3 asymmetry biased the policy
-toward "always predict False" and calibration collapsed. v7 fixes:
+v7 reward — first attempt to fix the B-7 Pentomino collapse (see
+doc/eval_2026-04-30_b7_rl_phase1.md). v7 changes vs v6:
 
   1. Symmetric magnitudes — TP=+1.0, FN=-1.0, FP=-1.0, TN=+1.0
-     Removes intrinsic per-class bias.
+  2. Per-batch class balancing — inverse GT-frequency, capped to [floor, cap]
+  3. Per-step progress bonus on valid actions
 
-  2. Per-batch class balancing — within each rollout batch, rescale per-step
-     calibration rewards by inverse GT-class frequency:
-         w_class = total / (2 * max(n_class, 1)),   capped to [floor, cap]
-     A single TN step in a 90/10 doom/solv batch then carries ≈9× the gradient
-     of a single TP step. Cap (default 5.0) prevents one rare-class sample from
-     dominating instability.
+v7 partially helped (delayed collapse from step ~50 to step ~75) but didn't
+prevent it: the sanity test (sanity_2026-04-30_b7_rollout_stats.json) showed
+the static reward landscape favors oracle (oracle +1.00 vs always_false +0.46
+under v7), so the collapse must be a *dynamic* drift off the SFT optimum
+under noisy GRPO advantages, not a static reward-landscape problem.
 
-  3. Per-step progress bonus — +progress_bonus_per_step per valid action that
-     advances the trajectory (regardless of outcome). Rewards making moves
-     that don't immediately doom the board, so the policy gets exposure to
-     pre-BP solvable states (where TN signal lives).
+v8 reward = v7 + auxiliary KL anchor on <viability>/<solvable> tag tokens
+against the frozen ref_policy. The KL coefficient is large (default 0.5)
+and concentrated only on the tag content tokens (typically the "true" or
+"false" inside the tag), so calibration stays locked at SFT quality while
+action tokens still optimize freely. This directly addresses the dynamic
+calibration drift identified in the sanity test.
 
 Uses pure transformers (no TRL, no vLLM).
 """
@@ -94,7 +94,12 @@ class RLConfig:
 
     # Reward — v6 (default) preserves Sudoku tuning; v7 fixes the B-7 Pentomino
     # collapse caused by short rollouts + per-class asymmetry (see module docstring).
-    reward_version: str = "v6"            # "v6" | "v7"
+    # v8 = v7 + auxiliary KL anchor on <viability>/<solvable> tag tokens against
+    # the SFT reference. Fixes the dynamic calibration drift observed when v7 alone
+    # was insufficient (sanity test 2026-04-30 showed oracle is global max but the
+    # local gradient drifts the policy off-manifold). The tag-specific anchor is a
+    # tighter leash on just the calibration tokens, leaving action tokens free.
+    reward_version: str = "v6"            # "v6" | "v7" | "v8"
     tp_reward: float = 1.0
     fn_reward: float = -0.7
     fp_reward: float = -0.5
@@ -108,6 +113,11 @@ class RLConfig:
     class_balance_cap: float = 5.0        # max weight (avoid rare-class instability)
     # v7 only — per-step progress bonus on valid actions that advance the trajectory
     progress_bonus_per_step: float = 0.0
+    # v8 only — extra KL penalty applied to <viability>/<solvable> tag content tokens
+    # against ref_policy. Coefficient is per-step (not per-token), so a single
+    # anchor applies the same total pressure regardless of how the tag tokenizes.
+    # Set to 0.0 to disable.
+    viability_kl_coef: float = 0.0
 
     # Eval / save
     eval_every: int = 50
@@ -144,6 +154,43 @@ def parse_solvable(text: str) -> Optional[bool]:
     if not m:
         return None
     return m.group(1).lower() == "true"
+
+
+_re_viability_or_solvable = re.compile(
+    r"<(?:viability|solvable)>\s*(true|false)\s*</(?:viability|solvable)>",
+    re.IGNORECASE,
+)
+
+
+def find_viability_token_positions(tokenizer, response_text: str, response_ids: list) -> list:
+    """Return token indices in `response_ids` that fall inside <viability>...</viability>
+    (or <solvable>...</solvable>) — specifically, the positions of the "true"/"false"
+    content. Used by the v8 viability-tag KL anchor.
+
+    Implementation: find the char span of the tag content via regex, then re-tokenize
+    `response_text` with offset_mapping (fast tokenizer) to map char span → token span.
+    Returns [] if no tag is present, the regex doesn't match, or the re-tokenization
+    length disagrees with `response_ids` (rare tokenization roundtrip mismatch).
+
+    The tradeoff with using offset_mapping: it requires a HF "fast" tokenizer. Qwen2.5
+    is fast, but if a future model isn't we'd need a fallback. For now we just return []
+    on any inconsistency rather than risk masking the wrong tokens.
+    """
+    m = _re_viability_or_solvable.search(response_text)
+    if not m:
+        return []
+    char_start, char_end = m.start(1), m.end(1)
+    try:
+        enc = tokenizer(response_text, return_offsets_mapping=True, add_special_tokens=False)
+    except (TypeError, NotImplementedError):
+        return []  # slow tokenizer, no offset mapping
+    re_ids = enc["input_ids"]
+    re_offsets = enc["offset_mapping"]
+    if len(re_ids) != len(response_ids):
+        # Tokenization roundtrip mismatch (extremely rare with bf16 sampled responses).
+        # Skip the anchor on this step rather than risk masking the wrong tokens.
+        return []
+    return [i for i, (s, e) in enumerate(re_offsets) if s < char_end and e > char_start]
 
 
 def parse_action(text: str) -> Optional[tuple]:
@@ -636,6 +683,8 @@ def ppo_update(
     total_kl_loss = 0.0
     total_clipfrac = 0.0
     total_tokens = 0
+    total_via_kl = 0.0    # v8: weighted sum of viability-tag KL across all steps
+    total_via_tokens = 0  # v8: total number of viability tokens seen
 
     for adv, ro in zip(advantages, rollouts):
         for step in ro.steps:
@@ -677,6 +726,26 @@ def ppo_update(
 
             kl = (new_logp - ref_logp).pow(2).mean()  # squared logprob deviation as proxy KL
             loss = pg_loss + cfg.kl_coef * kl
+
+            # v8: auxiliary KL anchor on <viability>/<solvable> tag content tokens
+            # against the ref_policy. Targets the dynamic calibration drift observed
+            # in the v6/v7 collapse — keeps the calibration tag locked at SFT quality
+            # while leaving action tokens free to optimize.
+            via_kl_step = 0.0
+            n_via = 0
+            if cfg.viability_kl_coef > 0.0:
+                via_idx = find_viability_token_positions(
+                    tokenizer, step.response_text, step.response_ids[:min_len]
+                )
+                if via_idx:
+                    idx_t = torch.tensor(via_idx, device=device, dtype=torch.long)
+                    new_via = new_logp.index_select(0, idx_t)
+                    ref_via = ref_logp.index_select(0, idx_t)
+                    via_kl = (new_via - ref_via).pow(2).mean()
+                    loss = loss + cfg.viability_kl_coef * via_kl
+                    via_kl_step = float(via_kl.item())
+                    n_via = len(via_idx)
+
             (loss / max(1, len(rollouts))).backward()
 
             with torch.no_grad():
@@ -685,9 +754,12 @@ def ppo_update(
                 total_kl_loss += kl.item() * new_logp.numel()
                 total_clipfrac += clipfrac * new_logp.numel()
                 total_tokens += new_logp.numel()
+                total_via_kl += via_kl_step * max(1, n_via)
+                total_via_tokens += n_via
 
     if total_tokens == 0:
-        return {"pg_loss": 0.0, "kl": 0.0, "clipfrac": 0.0, "n_tokens": 0}
+        return {"pg_loss": 0.0, "kl": 0.0, "clipfrac": 0.0, "n_tokens": 0,
+                "via_kl": 0.0, "n_via_tokens": 0}
 
     torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
     optimizer.step()
@@ -698,6 +770,8 @@ def ppo_update(
         "kl": total_kl_loss / total_tokens,
         "clipfrac": total_clipfrac / total_tokens,
         "n_tokens": total_tokens,
+        "via_kl": (total_via_kl / total_via_tokens) if total_via_tokens > 0 else 0.0,
+        "n_via_tokens": total_via_tokens,
     }
 
 
@@ -766,15 +840,20 @@ def main():
     p.add_argument("--kl-coef", type=float, default=0.05)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--eval-every", type=int, default=25)
-    # v7 reward (recommended for short-rollout envs like Pentomino)
-    p.add_argument("--reward-version", default="v6", choices=["v6", "v7"],
+    # v7/v8 reward shapes
+    p.add_argument("--reward-version", default="v6", choices=["v6", "v7", "v8"],
                    help="v6 = per-class asymmetric (Sudoku-tuned); "
                         "v7 = symmetric magnitudes + class-balanced + progress bonus "
-                        "(fixes B-7 Pentomino collapse).")
+                        "(intermediate fix for B-7 collapse); "
+                        "v8 = v7 + auxiliary KL anchor on <viability>/<solvable> tag tokens "
+                        "against ref policy (fixes the dynamic calibration drift).")
     p.add_argument("--progress-bonus", type=float, default=None,
-                   help="Override progress bonus per valid step. Defaults: v6=0.0, v7=0.1.")
+                   help="Override progress bonus per valid step. Defaults: v6=0.0, v7/v8=0.1.")
     p.add_argument("--class-balance-cap", type=float, default=5.0,
-                   help="Cap on inverse-frequency class weight (v7).")
+                   help="Cap on inverse-frequency class weight (v7/v8).")
+    p.add_argument("--viability-kl-coef", type=float, default=None,
+                   help="Coefficient on the per-step viability-tag KL anchor. "
+                        "Defaults: v6/v7=0.0, v8=0.5.")
     args = p.parse_args()
 
     cfg = RLConfig(
@@ -793,9 +872,10 @@ def main():
         class_balance_cap=args.class_balance_cap,
     )
 
-    # Apply v7 reward defaults (per module docstring): symmetric magnitudes,
-    # class balancing on, progress bonus on. Individual overrides via CLI/env still apply.
-    if cfg.reward_version == "v7":
+    # Apply v7/v8 reward defaults (per module docstring).
+    # v7: symmetric magnitudes + class balance + progress bonus.
+    # v8: v7 + viability-tag KL anchor (default coef 0.5).
+    if cfg.reward_version in ("v7", "v8"):
         cfg.tp_reward = 1.0
         cfg.fn_reward = -1.0
         cfg.fp_reward = -1.0
@@ -804,6 +884,11 @@ def main():
         cfg.progress_bonus_per_step = 0.1 if args.progress_bonus is None else args.progress_bonus
     elif args.progress_bonus is not None:
         cfg.progress_bonus_per_step = args.progress_bonus
+
+    if cfg.reward_version == "v8":
+        cfg.viability_kl_coef = 0.5 if args.viability_kl_coef is None else args.viability_kl_coef
+    elif args.viability_kl_coef is not None:
+        cfg.viability_kl_coef = args.viability_kl_coef
 
     # Setup
     os.makedirs(cfg.output_dir, exist_ok=True)
@@ -908,10 +993,12 @@ def main():
             **cb_metrics,
             **ppo_metrics,
         }
+        via_kl_str = (f" | via_kl {log.get('via_kl', 0):.4f}"
+                      if cfg.viability_kl_coef > 0 else "")
         print(f"step {step:4d} | reward {log['reward_mean']:+.2f}±{log['reward_std']:.2f} | "
               f"solved {solved_rate*100:.0f}% | pg_loss {log.get('pg_loss', 0):+.3f} | "
-              f"kl {log.get('kl', 0):.4f} | clipfrac {log.get('clipfrac', 0):.2f} | "
-              f"step_t {elapsed:.0f}s")
+              f"kl {log.get('kl', 0):.4f} | clipfrac {log.get('clipfrac', 0):.2f}"
+              f"{via_kl_str} | step_t {elapsed:.0f}s")
         with open(log_path, "a") as f:
             f.write(json.dumps(log) + "\n")
 

@@ -1,0 +1,60 @@
+{
+  "config": {
+    "checkpoint": "outputs/sft_pentomino_easy_b7_spa_hparams/final",
+    "n_puzzles": 50,
+    "group_size": 8,
+    "n_rollouts": 400,
+    "temperature": 0.7,
+    "board": "5x4",
+    "piece_set": [
+      "L",
+      "P",
+      "W",
+      "Y"
+    ],
+    "seed": 4242
+  },
+  "rollout_lengths": {
+    "histogram": {
+      "1": 292,
+      "2": 108
+    },
+    "mean": 1.27,
+    "median": 1
+  },
+  "first_action_doom_rate": {
+    "n_rollouts_with_first_action": 400,
+    "n_first_action_doom": 292,
+    "rate": 0.73
+  },
+  "per_step_class_composition": {
+    "n_solv": 108,
+    "n_doom": 292,
+    "solv_frac": 0.27,
+    "doom_frac": 0.73
+  },
+  "pass_at_1": {
+    "n_solved": 0,
+    "n_total": 400,
+    "rate": 0.0
+  },
+  "viability_prediction": {
+    "accuracy": 0.9803,
+    "n_total_predictions": 407,
+    "frac_predicted_true": 0.2629
+  },
+  "counterfactual_expected_per_step_reward": {
+    "v6": {
+      "always_true": -0.43,
+      "always_false": 0.595,
+      "oracle": 0.811,
+      "sft_actual": 0.807
+    },
+    "v7": {
+      "always_true": -0.46,
+      "always_false": 0.46,
+      "oracle": 1.0,
+      "sft_actual": 0.99
+    }
+  }
+}
