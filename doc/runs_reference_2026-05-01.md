@@ -115,21 +115,31 @@ point, see [HANDOFF.md](HANDOFF.md).
 - **Detailed reports**: [eval_2026-04-30_b7_pentomino_easy.md](eval_2026-04-30_b7_pentomino_easy.md),
   [sanity_2026-04-30_b7_rollout_stats.json](sanity_2026-04-30_b7_rollout_stats.json).
 
-### B-8 🔄 (in flight, retraining after disk-full crash)
+### B-8 ✅ (completed, augmentation cured Pass@1=0%)
 
 - **Goal**: Test the late-stage scarcity hypothesis — does adding 30× oversampled
   solution-path samples (uniform across step 0-3) lift Pass@1 off 0%?
-- **Status**: 🔄 **retraining on autodl1** (first attempt crashed at final save
-  due to autodl1 disk full; cleaned 28 GB and relaunched).
+- **Status**: ✅ **completed on autodl1, 2026-05-01**. First attempt crashed at
+  final save (autodl1 disk full); cleaned 28 GB and retrained successfully.
 - **Hparameters**: Same as B-7 (lr=1e-4, ep=5, bs=16, max_length=1024).
 - **Data**: `data/pentomino_b8_combined/wm_train_no_post_bp.parquet`
   (5,124 train: B-7's 2,964 + 30× × 72 augmented = 2,160. Distribution: step 0
   57%, step 1 21%, step 2 11%, step 3 11% ← **first non-zero step-3 coverage**).
-- **Checkpoint**: pending (`outputs/sft_pentomino_b8_augmented/final/`).
-- **Result**: pending. Success criteria: AUC ≥ 0.95, Pass@1 stochastic > 0%,
-  rollout-length distribution shifts to include step 3.
-- **Notes**: Augmenter at [src/data/solution_path_augmenter.py](../src/data/solution_path_augmenter.py).
-  Combiner at [scripts/combine_b7_with_augmented.py](../scripts/combine_b7_with_augmented.py).
+- **Checkpoint**: `outputs/sft_pentomino_b8_augmented/final/` (autodl).
+- **Result** (logprob eval + sanity rollout test):
+  - AUC = **1.000** (perfect, matches B-7 — augmentation didn't degrade discrimination)
+  - Threshold sweep: 100% Acc / Prec(T) / Rec(T) at all τ from 0.10 to 0.95
+  - **Pass@1 stochastic (T=0.7) = 22.25%** (89/400) ← was 0/400 on B-7
+  - Rollout length distribution: **30% reach step 4 (complete tilings)** vs 0% on B-7
+  - First-action doom rate: 39% vs 73% on B-7 (model also picks better first moves)
+  - Calibration trade: 98% → 91% viability accuracy (small)
+- **Notes**:
+  - Augmenter at [src/data/solution_path_augmenter.py](../src/data/solution_path_augmenter.py).
+  - Combiner at [scripts/combine_b7_with_augmented.py](../scripts/combine_b7_with_augmented.py).
+  - Sanity stats at [doc/sanity_2026-05-01_b8_rollout_stats.json](sanity_2026-05-01_b8_rollout_stats.json).
+  - **Headline finding**: B-7's Pass@1=0% was a *data composition* problem, not a
+    recipe problem. The augmenter targeting late-stage states cured it by enabling
+    coherent multi-step format generation.
 
 ### B-9 📋 (planned)
 
@@ -224,27 +234,60 @@ point, see [HANDOFF.md](HANDOFF.md).
   the design goal. **This checkpoint is the input to the Phase 2 truncation
   experiment.**
 
-### Phase 2 truncation experiment 🔄 (option A in flight)
+### Phase 2 truncation experiment Option A ✅ (rollout-only, 10 steps)
 
 - **Goal**: Quantify the project's headline value claim — calibrated `<solvable>`
   predictions enable compute savings via early termination of doomed rollouts.
-- **Status**: 🔄 option A in flight on autodl2 (~20 min total).
+- **Status**: ✅ **completed 2026-05-01** on autodl2.
 - **Hparameters**:
   - source = v8 anchor checkpoint (`outputs/rl_b5_phase3_v8_anchor/final`)
   - 10 rollout steps × truncation_mode=off
   - 10 rollout steps × truncation_mode=conservative, **τ=0.99**
-  - same seed both conditions for apples-to-apples comparison
-- **τ selection**: from threshold sweep on v8 checkpoint (200 solvable + 200
-  unsolvable val samples): P(false)|GT=False mean 0.997, median 1.000;
+  - same seed both conditions
+- **τ selection**: threshold sweep on v8 checkpoint (200 solvable + 200 unsolvable
+  val samples): P(false)|GT=False mean 0.997, median 1.000;
   P(false)|GT=True mean 0.959. τ=0.99 picks the regime where most doom states
   are truncated and most solvable states are NOT.
-- **Checkpoints**: `outputs/trunc_exp_off/`, `outputs/trunc_exp_on_tau0.99/`.
-- **Result**: pending — will report wall-time savings, n_truncated_early,
-  mean_rollout_len, total_response_tokens per condition.
-- **Notes**: Plan doc: [plan_2026-05-01_truncation_experiment.md](plan_2026-05-01_truncation_experiment.md).
-  Trainer code change: [src/training/rl_trainer_v6.py:578-595](../src/training/rl_trainer_v6.py#L578)
-  (truncation gate wired up in `do_rollouts_batched`) and the analogous block
-  in `do_rollout`.
+- **Result**:
+  - Mean rollout time / step: 15.16 s → 14.10 s (**−7.0%**)
+  - Mean tokens / step: 16,094 → 12,562 (**−21.9%**)
+  - Mean rollout length: 4.50 → 3.52 (**−21.8%**)
+  - Truncated rollouts: 0 / 320 → **173 / 320 (54.1%)**
+  - Pass@1 / per-batch solve rate: preserved within sampling noise
+- **Notes**: The 22% token reduction is the genuine compute (FLOPs) savings.
+  Wall-time savings are smaller because batched rollouts are limited by the
+  longest-surviving rollout per turn. Detailed report:
+  [eval_2026-05-01_truncation_option_a.md](eval_2026-05-01_truncation_option_a.md).
+
+### Phase 2 truncation experiment Option B ✅ (full RL training, 50 steps)
+
+- **Goal**: End-to-end measurement of compute savings during agentic RL training,
+  capturing both rollout-phase and PPO-update-phase savings.
+- **Status**: ✅ **completed 2026-05-01** on autodl2.
+- **Hparameters**: same as Option A but **50 RL steps** per condition (not 10),
+  with eval_every=25 to track Pass@1 trajectory.
+- **Checkpoints**: `outputs/trunc_exp_b_off/final/`, `outputs/trunc_exp_b_on_tau0.99/final/`.
+- **Result**:
+  - **Mean step time: 64.81 s → 52.27 s (−19.4%)** ← much bigger than Option A's
+    −7% rollout-only number, because PPO update phase ALSO benefits from shorter
+    rollouts (fewer tokens to compute logprobs over)
+  - Total step time over 50 steps: 3,240 s → **2,613 s** (−10.4 min wall)
+  - Mean tokens / step: 16,195 → 12,402 (−23.4%)
+  - Mean rollout length: 4.55 → 3.49 (−23.3%)
+  - Truncated rollouts: 0/1,600 → **881/1,600 (55.1%)**
+  - Pass@1 / Eval — confounded by eval-time truncation:
+    - OFF: step 0 = 50.0%, step 25 = 53.3%, step 50 = 53.3%
+    - ON:  step 0 = 30.0%, step 25 = 23.3%, step 50 = 20.0%
+    - **Methodology note**: `quick_pass1()` eval also runs through the
+      truncation gate, so ON's eval Pass@1 underestimates the trained policy's
+      true Pass@1 (recoverable rollouts get killed during eval). For an
+      apples-to-apples comparison, the ON-final checkpoint should be re-eval'd
+      with `truncation_mode=off`.
+- **Notes**:
+  - Token + wall-time savings are correctly measured (these are rollout-and-update
+    metrics independent of eval procedure).
+  - Pass@1 number for the paper requires the clean re-eval (~5 min on autodl2).
+  - Launcher: [scripts/run_truncation_exp_option_b.sh](../scripts/run_truncation_exp_option_b.sh).
 
 ---
 
@@ -297,9 +340,73 @@ point, see [HANDOFF.md](HANDOFF.md).
   a non-zero Pass@1. This is the strongest piece of evidence that the Pentomino
   failure is env-shape, not reward-shape.
 
+### B-8 RL with v8 anchor 🔄 (in flight, stochastic-vs-greedy gap)
+
+- **Goal**: Test whether the v8 calibration anchor mechanism generalizes to
+  Pentomino once the SFT data composition is fixed (B-8). Sudoku v8 anchor lifted
+  Pass@1 33% → 50% with calibration held; does the same recipe work given B-8's
+  better starting point?
+- **Status**: 🔄 in flight on autodl1 (step 75/200, ~1.5 hr remaining).
+- **Hparameters**: source = B-8 SFT, env=polyomino 5×4, lr=1e-5, 200 steps,
+  --reward-version v8 --viability-kl-coef 0.5.
+- **Checkpoint**: pending (`outputs/rl_b8_v8_anchor/final/`).
+- **Result so far** (steps 25, 50, 75):
+  - **Per-batch solve rate (T=0.7) climbed 16% → 84% peak → 53-66% steady** — by
+    far the strongest Pentomino RL action-policy result we've ever produced.
+  - via_kl ≈ 0 throughout (single-token anchor active and effective on sampled
+    tokens), KL drift tiny (~0.01).
+  - **But greedy Pass@1 = 0% across all 3 evals** (steps 25, 50, 75); greedy
+    `solvable_acc` collapsed to 0.0 from initial 1.0.
+- **Diagnosis**: this is the **stochastic-vs-greedy gap**. v8 single-token anchor
+  preserves logp of the SAMPLED viability token, which keeps stochastic sampling
+  on-distribution. But greedy argmax is determined by the relative order of
+  >true vs >false logprobs at each viability position; if the unsampled token's
+  logp drifts independently, greedy can flip from True→False even with
+  via_kl=0. **Action policy and viability head are independently learnable axes
+  in our setup; RL improved the action head dramatically while viability greedy
+  collapsed.**
+- **Implication for paper**: Pass@8 (or stochastic Pass@N) from this checkpoint
+  should be huge given 53-84% per-batch solve rate. Greedy Pass@1 needs the
+  v8.2 dual-token anchor to be stable.
+- **Notes**: Drove the v8.2 implementation. Launcher:
+  [scripts/run_rl_b8_v8.sh](../scripts/run_rl_b8_v8.sh).
+
 ---
 
 ## Pending / proposed runs
+
+### B-8 RL with v8.2 (dual-token anchor) 📋
+
+- **Goal**: Test whether the v8.2 dual-token anchor (anchor BOTH `>true` and
+  `>false` logprobs at every viability position regardless of which was sampled)
+  closes the stochastic-vs-greedy gap that B-8 RL with single-token v8 exposed.
+- **Mechanism**: v8 only constrained logp of the sampled token. Greedy argmax
+  depends on the relative order of `>true` vs `>false` at each viability
+  position; if the unsampled token drifts, greedy flips. v8.2 anchors both
+  tokens by construction → relative ordering is preserved by the loss term.
+- **Pipeline**: same as B-8 RL with v8 but `--dual-token-anchor` enabled
+  (auto-detects token IDs at startup; verified `>true`=33284, `>false`=30392
+  on Qwen2.5).
+- **Hparameters**: source = B-8 SFT, env=polyomino 5×4, lr=1e-5, 200 steps,
+  --reward-version v8 --viability-kl-coef 0.5 --dual-token-anchor.
+- **Checkpoint**: pending (`outputs/rl_b8_v8_2_dual_anchor/final/`).
+- **Effort**: ~3-5 hr GPU (same as v8; small overhead for extra forward passes
+  on the 1-3 viability positions per response).
+- **Success criteria**: greedy Pass@1 ≥ B-8 SFT's 0% (i.e., positive), greedy
+  solvable_acc preserved. Per-batch stochastic solve rate stays high (50%+).
+- **Launcher**: [scripts/run_rl_b8_v8_2.sh](../scripts/run_rl_b8_v8_2.sh).
+
+### Phase 2 truncation re-eval (clean Pass@1 measurement) 📋
+
+- **Goal**: Re-evaluate the Option B ON-final checkpoint with
+  `truncation_mode=off` to disambiguate "training+truncation Pass@1" from
+  "eval-time truncation eval-side effect."
+- **Pipeline**: load `outputs/trunc_exp_b_on_tau0.99/final/`, run quick_pass1
+  on 30 fresh puzzles with truncation off.
+- **Effort**: ~5 min on autodl2.
+- **What it tells us**: if Pass@1 ≈ 50% under clean eval, truncation didn't
+  hurt the trained model and Option B's reported drop was eval-side artifact.
+  If still <50%, training-with-truncation actually regressed quality.
 
 ### B-9 SFT (5×10 / 10-piece, augmented)
 
