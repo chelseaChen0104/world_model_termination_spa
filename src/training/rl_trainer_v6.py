@@ -119,6 +119,16 @@ class RLConfig:
     # anchor applies the same total pressure regardless of how the tag tokenizes.
     # Set to 0.0 to disable.
     viability_kl_coef: float = 0.0
+    # v8.2 — dual-token anchor. When True, the viability KL anchor penalizes
+    # squared deviation of BOTH `>true` and `>false` logprobs at every
+    # viability position, regardless of which token was sampled. v8 only
+    # constrained the sampled token's logp, which preserved stochastic-sampling
+    # behavior but allowed greedy argmax to flip if the unsampled token's logp
+    # drifted. v8.2 directly anchors the relative ordering of >true vs >false.
+    # Token IDs are auto-detected at trainer startup (see get_viability_token_ids).
+    viability_dual_token_anchor: bool = False
+    viability_true_token_id: int = -1
+    viability_false_token_id: int = -1
     # v8.1 / fallback — direct action-quality reward, separate from viability prediction.
     # +action_quality_bonus on every step where action_was_valid AND next_state is
     # solvable; -action_quality_bonus when next_state is doom. This adds a gradient
@@ -168,6 +178,38 @@ _re_viability_or_solvable = re.compile(
     r"<(?:viability|solvable)>\s*(true|false)\s*</(?:viability|solvable)>",
     re.IGNORECASE,
 )
+
+
+def get_viability_token_ids(tokenizer) -> tuple:
+    """Detect the BPE token IDs that the tokenizer emits for the "true" and "false"
+    content of a <viability>...</viability> tag (and equivalently <solvable>).
+
+    On Qwen2.5 these are typically merged tokens like '>true' and '>false' (single
+    BPE token combining the closing '>' of the opening tag with the content), but
+    the function discovers them generically via offset mapping so it works on any
+    fast tokenizer.
+
+    Returns (true_id, false_id) or (-1, -1) if discovery fails.
+    """
+    out = [-1, -1]
+    for label_idx, label in enumerate(("true", "false")):
+        for tag in ("viability", "solvable"):
+            sample = f"<{tag}>{label}</{tag}>"
+            try:
+                enc = tokenizer(sample, return_offsets_mapping=True, add_special_tokens=False)
+            except (TypeError, NotImplementedError):
+                continue
+            ids = enc["input_ids"]
+            offsets = enc["offset_mapping"]
+            char_start = sample.index(label)
+            char_end = char_start + len(label)
+            for i, (s, e) in enumerate(offsets):
+                if s < char_end and e > char_start:
+                    out[label_idx] = ids[i]
+                    break
+            if out[label_idx] >= 0:
+                break
+    return tuple(out)
 
 
 def find_viability_token_positions(tokenizer, response_ids: list) -> list:
@@ -716,6 +758,65 @@ def compute_response_logprobs(model, tokenizer, prompt_text: str, response_ids: 
     return torch.stack(logp_per_token)
 
 
+def compute_response_logprobs_with_via_dual(model, tokenizer, prompt_text: str,
+                                              response_ids: list, device: str,
+                                              viability_positions: list,
+                                              true_token_id: int, false_token_id: int):
+    """Like `compute_response_logprobs` but ALSO returns, at each requested
+    viability position, the logp of `true_token_id` and `false_token_id`
+    under the model's predictive distribution at that position.
+
+    The viability positions are indices into the *response* (0..len(response_ids)-1),
+    matching what `find_viability_token_positions` returns.
+
+    Returns:
+        logp_per_token: [n] tensor — per-token logprobs of the response (sampled tokens)
+        via_dual_logps: [n_via, 2] tensor — column 0 = logp(true_id), column 1 = logp(false_id)
+                        at each viability position, in the order of `viability_positions`.
+                        Empty tensor [0, 2] if `viability_positions` is empty.
+    """
+    full_text = prompt_text + tokenizer.decode(response_ids, skip_special_tokens=False)
+    full_ids = tokenizer(full_text, return_tensors="pt").input_ids.to(device)
+    prompt_ids = tokenizer(prompt_text, return_tensors="pt").input_ids.to(device)
+    prompt_len = prompt_ids.shape[1]
+
+    out = model(full_ids)
+    logits = out.logits  # [1, T, V]
+
+    response_positions = list(range(prompt_len, full_ids.shape[1]))
+    logp_per_token = []
+    for j in response_positions:
+        if j - 1 < 0 or j >= full_ids.shape[1]:
+            continue
+        log_probs = F.log_softmax(logits[0, j - 1], dim=-1)
+        logp_per_token.append(log_probs[full_ids[0, j]])
+
+    # Dual-token logps at viability positions.
+    # `viability_positions[k]` is an index into response_ids (0-indexed).
+    # The corresponding response_position in full_ids is prompt_len + k_resp_idx.
+    # The logits that PREDICTED that response token are at full_ids position k_resp_idx + prompt_len - 1.
+    via_dual = []
+    if viability_positions and true_token_id >= 0 and false_token_id >= 0:
+        for k_resp_idx in viability_positions:
+            j = prompt_len + k_resp_idx
+            if j - 1 < 0 or j - 1 >= full_ids.shape[1]:
+                continue
+            log_probs = F.log_softmax(logits[0, j - 1], dim=-1)
+            via_dual.append(torch.stack([log_probs[true_token_id], log_probs[false_token_id]]))
+
+    if not logp_per_token:
+        logp_t = torch.zeros(0, device=device)
+    else:
+        logp_t = torch.stack(logp_per_token)
+
+    if not via_dual:
+        via_dual_t = torch.zeros(0, 2, device=device)
+    else:
+        via_dual_t = torch.stack(via_dual)  # [n_via, 2]
+
+    return logp_t, via_dual_t
+
+
 def grpo_advantages(rollouts: list, group_size: int) -> list:
     """Group-relative advantage: (reward_i - mean(group)) / (std(group) + eps).
 
@@ -796,6 +897,12 @@ def ppo_update(
             # against the ref_policy. Targets the dynamic calibration drift observed
             # in the v6/v7 collapse — keeps the calibration tag locked at SFT quality
             # while leaving action tokens free to optimize.
+            #
+            # v8.2: when cfg.viability_dual_token_anchor is True, anchor BOTH
+            # >true and >false logprobs at every viability position regardless of
+            # which was sampled. Prevents greedy argmax from flipping when the
+            # unsampled token's logp drifts (the failure mode observed on
+            # Pentomino in B-7/B-8 RL — stochastic OK, greedy collapses).
             via_kl_step = 0.0
             n_via = 0
             if cfg.viability_kl_coef > 0.0:
@@ -806,14 +913,39 @@ def ppo_update(
                     via_idx = find_viability_token_positions(tokenizer, step.response_ids)
                 # Constrain to the truncated logp range
                 via_idx = [i for i in via_idx if i < min_len]
+
                 if via_idx:
-                    idx_t = torch.tensor(via_idx, device=device, dtype=torch.long)
-                    new_via = new_logp.index_select(0, idx_t)
-                    ref_via = ref_logp.index_select(0, idx_t)
-                    via_kl = (new_via - ref_via).pow(2).mean()
-                    loss = loss + cfg.viability_kl_coef * via_kl
-                    via_kl_step = float(via_kl.item())
-                    n_via = len(via_idx)
+                    if cfg.viability_dual_token_anchor and cfg.viability_true_token_id >= 0 and cfg.viability_false_token_id >= 0:
+                        # v8.2: extra forward passes to get logp(>true) and logp(>false)
+                        # at each viability position under both new and ref policies.
+                        # Penalize squared deviation of both → preserves relative
+                        # ordering of >true and >false at each viability position.
+                        with torch.no_grad():
+                            _, ref_via_dual = compute_response_logprobs_with_via_dual(
+                                ref_policy, tokenizer, step.prompt_text, step.response_ids,
+                                device, via_idx,
+                                cfg.viability_true_token_id, cfg.viability_false_token_id,
+                            )
+                        _, new_via_dual = compute_response_logprobs_with_via_dual(
+                            policy, tokenizer, step.prompt_text, step.response_ids,
+                            device, via_idx,
+                            cfg.viability_true_token_id, cfg.viability_false_token_id,
+                        )
+                        if new_via_dual.numel() > 0 and ref_via_dual.numel() > 0:
+                            n_pos = min(new_via_dual.shape[0], ref_via_dual.shape[0])
+                            via_kl = (new_via_dual[:n_pos] - ref_via_dual[:n_pos]).pow(2).mean()
+                            loss = loss + cfg.viability_kl_coef * via_kl
+                            via_kl_step = float(via_kl.item())
+                            n_via = n_pos
+                    else:
+                        # v8: anchor sampled-token logp only.
+                        idx_t = torch.tensor(via_idx, device=device, dtype=torch.long)
+                        new_via = new_logp.index_select(0, idx_t)
+                        ref_via = ref_logp.index_select(0, idx_t)
+                        via_kl = (new_via - ref_via).pow(2).mean()
+                        loss = loss + cfg.viability_kl_coef * via_kl
+                        via_kl_step = float(via_kl.item())
+                        n_via = len(via_idx)
 
             (loss / max(1, len(rollouts))).backward()
 
@@ -923,6 +1055,11 @@ def main():
     p.add_argument("--viability-kl-coef", type=float, default=None,
                    help="Coefficient on the per-step viability-tag KL anchor. "
                         "Defaults: v6/v7=0.0, v8=0.5.")
+    p.add_argument("--dual-token-anchor", action="store_true", default=False,
+                   help="v8.2: anchor BOTH >true and >false logprobs at every "
+                        "viability position regardless of which was sampled. "
+                        "Use to fix greedy argmax flipping when single-token "
+                        "anchor isn't enough (Pentomino with success_bonus rare).")
     p.add_argument("--action-quality-bonus", type=float, default=None,
                    help="Per-step action-quality reward magnitude. "
                         "Adds +bonus on action→solvable, -bonus on action→doom. "
@@ -971,6 +1108,10 @@ def main():
     elif args.viability_kl_coef is not None:
         cfg.viability_kl_coef = args.viability_kl_coef
 
+    # v8.2 dual-token anchor (composable with any v8 setup)
+    if args.dual_token_anchor:
+        cfg.viability_dual_token_anchor = True
+
     # Action-quality reward — composable with any reward version (default 0.0 = off).
     if args.action_quality_bonus is not None:
         cfg.action_quality_bonus = args.action_quality_bonus
@@ -996,6 +1137,20 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    # Detect viability true/false token IDs once. Used by v8.2 dual-token anchor.
+    cfg.viability_true_token_id, cfg.viability_false_token_id = get_viability_token_ids(tokenizer)
+    if cfg.viability_dual_token_anchor:
+        if cfg.viability_true_token_id < 0 or cfg.viability_false_token_id < 0:
+            raise RuntimeError(
+                "v8.2 dual-token anchor requested but could not auto-detect "
+                "viability true/false token IDs. Inspect tokenizer manually."
+            )
+        print(f"  v8.2 dual-token anchor enabled — "
+              f"true_id={cfg.viability_true_token_id} "
+              f"({tokenizer.decode([cfg.viability_true_token_id])!r}), "
+              f"false_id={cfg.viability_false_token_id} "
+              f"({tokenizer.decode([cfg.viability_false_token_id])!r})")
 
     # Models — policy (trainable) + ref (frozen B-5)
     print(f"\nLoading policy from: {cfg.sft_checkpoint}")
