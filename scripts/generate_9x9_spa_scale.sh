@@ -45,6 +45,10 @@ run_one() {
     local n=$2
     local out_dir=$3
     local seed=$4
+    if [ "$n" = "0" ]; then
+        echo "  SKIPPING: difficulty=$difficulty (N=0 — assumed already generated)"
+        return 0
+    fi
     echo "============================================================"
     echo "  STARTING: difficulty=$difficulty n=$n out=$out_dir seed=$seed"
     echo "============================================================"

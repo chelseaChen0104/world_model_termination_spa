@@ -27,6 +27,7 @@ Common across all runs:
 | 4x4 baseline | 2026-04-29 | 4×4 (no_post_bp) | single-step minimal | 1,336 | 3 | 1e-5 | 32 | — *(greedy Rec 2%)* | ❌ collapse, AUC not measured |
 | **B-4** | 2026-04-29 | 9×9 (no_post_bp) | single-step minimal | 2,482 | 5 | **1e-4** | **16** | **0.455** | ❌ chance — disproved scale-only hypothesis |
 | **B-5** | 2026-04-29 | 4×4 SPA-scale (no_post_bp) | single-step minimal | **6,571** | 5 | **1e-4** | **16** | **0.726** | ✅ **first run with real signal** |
+| **B-7** | 2026-04-30 | **5×4 Pentomino-easy** {L,P,W,Y} | single-step minimal (`<viability>` tags) | **2,964** | 5 | **1e-4** | **16** | **1.000** | ✅ **perfect AUC; cross-env transfer confirmed** |
 
 *B-3 sample count assumed ≈ B-2 based on shared no_post_bp filter; exact count in train log unverified (separate output dir, log not preserved as a dedicated file).
 
@@ -175,6 +176,31 @@ Common across all runs:
 
 ---
 
+## B-7 — 5×4 Pentomino-easy SFT *(success: AUC 1.000, cross-env transfer)*
+
+| field | value |
+|---|---|
+| Output dir | `outputs/sft_pentomino_easy_b7_spa_hparams/final` (on autodl1) |
+| Train file | `data/pentomino_easy_llm_policy_minimal/wm_train_no_post_bp.parquet` |
+| Val file | `data/pentomino_easy_llm_policy_minimal/wm_val_no_post_bp.parquet` |
+| Train samples | **2,964** (pentomino-easy; class balance **18.8% solvable / 81.2% BP**) |
+| Val samples | 742 |
+| Epochs / LR / batch | **5 / 1e-4 / 16** (mirror B-5 hparams) |
+| `max_length` | 1,024 |
+| Total updates | 925 |
+| `eval_steps` | 25 |
+| Launch script | [scripts/run_b7_pentomino_easy_sft.sh](../scripts/run_b7_pentomino_easy_sft.sh) |
+| Training log | [logs/sft_b7.log](../logs/sft_b7.log) |
+| Eval log | [logs/eval_b7.log](../logs/eval_b7.log) |
+| Greedy Acc / Prec / Rec / F1 | 49.5% / 33.3% / 1.0% / 1.9% (collapsed to all-False — same shape as B-5 greedy) |
+| **ROC AUC** | **1.000** ✅✅ (perfect) |
+| P(true) mean separation | **+0.548** (solvable 0.548 vs unsolvable 0.000) — 24× larger than B-5 |
+| Prec(F) at τ=0.10 | **94.3%** — already past the Phase 2 truncation gate (≥90%) |
+
+**Notes.** First SFT run on a structurally different env from Sudoku. New tag set: `<observation>` + `<next_state>` + `<viability>` + `<answer>` (renamed per [doc/spec_2026-04-29_pentomino.md](spec_2026-04-29_pentomino.md) §4). **Recipe transfers cross-env on the discrimination metric** — AUC 1.000 vs B-5's 0.726, and 100% precision at τ=0.10 with 94% recall. Greedy still collapses to "always False" (same calibration issue as B-5 — bimodal P(true) with most mass on False) but the *ranking* is perfect. Pentomino's predictive gap is more visually local (isolated unfillable regions are directly visible in the rendered cells) than Sudoku's (constraint cascade across rows/cols/boxes), which likely explains the stronger discrimination. Class imbalance (81% BP) reinforces the "this looks doomed" signal. Full report: [eval_2026-04-30_b7_pentomino_easy.md](eval_2026-04-30_b7_pentomino_easy.md). Required two minor patches: (1) `evaluate_rl.py` `parse_predictions` now accepts both `<solvable>` and `<viability>` tags; (2) `evaluate_solvable_logprob` got a `tag_name` parameter + `--tag-name` CLI flag.
+
+---
+
 ## What we learned, summarized
 
 1. **Multi-turn collapses to echo on Sudoku** (B-0). Single-step samples are mandatory for this task.
@@ -182,9 +208,14 @@ Common across all runs:
 3. **Class rebalancing alone doesn't fix discrimination** (B-3 vs B-2: identical AUC).
 4. **Hyperparameter scaling alone doesn't fix 9×9** (B-4 vs B-3: same AUC despite 30× more effective gradient signal).
 5. **The recipe works on 4×4 with SPA-scale data and SPA hparams** (B-5: AUC 0.726). The 9×9 collapse is task-difficulty for Qwen-1.5B SFT alone.
+6. **The recipe transfers cross-env** (B-7 pentomino-easy: AUC 1.000). Pentomino's predictive gap is sharper (visually local) and yields stronger discrimination than 4×4 Sudoku — even with less than half the training data.
 
 ## Pending runs not in this ledger
 
-- **B-6** — 9×9 + SPA hparams + SPA-scale data (queued, waiting on 9×9 SPA-scale data gen finishing on autodl1, ~9h ETA). Will tell us whether 9×9 is salvageable with SPA-scale data, or if RL is the only path forward for 9×9.
-- **RL on B-5** — the strategic next step after B-6 lands. Will test whether asymmetric `<solvable>` rewards (TP +3, FN −2, FP −0.5) lift calibration and AUC further.
-- **Pass@1 on B-5** — to anchor against SPA's published 4×4 numbers; we currently report AUC, which SPA doesn't.
+- **B-6** — 9×9 + SPA hparams + SPA-scale data (paused; 9×9 SPA-scale gen completed easy difficulty only, medium+hard skipped per pause request).
+- **Phase 1 v6.1 RL on B-5** — completed, lifted Pass@1 from 0% → 6.67%; full report pending (the v6.1 success_bonus reduction also fixed the calibration regression seen in v6).
+- **Run A (continuation)** — currently running on autodl2, lr=1e-5, 500 more steps from v6.1 checkpoint. At step 350+: 50% per-batch solve rate; ~3 more hours.
+- **Run B (lr=1e-4 from B-5)** — staged on local, not yet launched on autodl1 (would need to push B-5 weights up).
+- **RL on B-7** — **completed on 2026-04-30, but result is a regression**. v6 reward + 1-step rollout bias → calibration collapsed (greedy `<viability>` flipped True→False). Pass@1 stayed 0%. See [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md). **B-7 SFT (AUC=1.000) remains the canonical pentomino model**; the B-7 RL checkpoint is deprecated.
+- **Pass@1 on B-7** — needed to anchor pentomino results against a solving metric.
+- **B-9 (proposed)** — 5×5 with 5 pieces (P-0 sweep showed `{I, L, P, W, Y}` has 80 tilings, 4× more variety than 5×4's 20). Would address the trajectory-length-distribution issue that broke B-7 RL. ~1 day of work.

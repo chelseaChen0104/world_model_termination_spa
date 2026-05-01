@@ -69,11 +69,24 @@ class LLMTrajectoryGenerator:
         "Output ONLY the <answer>...</answer> tag. No reasoning, no extra text, no other tags."
     )
 
+    DATA_GEN_SYSTEM_PROMPT_POLYOMINO = (
+        "You are solving a pentomino tiling puzzle. The user will show you the current board, "
+        "where '.' = empty cell and a letter = a cell occupied by that pentomino. Below the board "
+        "is the list of remaining pieces.\n\n"
+        "Your job: choose ONE remaining piece, an orientation, and an anchor cell to place it. "
+        "Output your move EXACTLY in this format:\n"
+        "<answer>place {P} ori={K} at row {R} col {C}</answer>\n"
+        "where {P} is the piece letter (one of the remaining pieces), {K} is the orientation id "
+        "(an integer >= 0), and (R, C) are 1-indexed cell coordinates for the anchor cell "
+        "(top-most leftmost cell of the placed piece's footprint).\n\n"
+        "Output ONLY the <answer>...</answer> tag. No reasoning, no extra text, no other tags."
+    )
+
     def __init__(self, env, config: Optional[LLMTrajectoryConfig] = None,
                  variant: str = "sudoku_full"):
         """
         Args:
-            env: BaseTerminationEnv instance (e.g., SudokuEnv)
+            env: BaseTerminationEnv instance (e.g., SudokuEnv, PolyominoEnv)
             config: LLM configuration
             variant: SFT formatter variant (determines the SFT-target system prompt;
                      the data-gen system prompt is independent — see config.use_minimal_data_gen_prompt)
@@ -84,11 +97,14 @@ class LLMTrajectoryGenerator:
 
         # Choose data-gen system prompt:
         # - minimal: only ask for <answer> tag — high parse rate, fast decode
-        # - full: same prompt as the SFT target (SPA-style with all six tags) — base Qwen
+        # - full: same prompt as the SFT target (with full reasoning tags) — base Qwen
         #   struggles to comply, parse rate ~30-50%, decode is slow
         if self.config.use_minimal_data_gen_prompt:
-            # TODO: branch on variant when we add Sokoban/FrozenLake
-            self.system_prompt = self.DATA_GEN_SYSTEM_PROMPT_SUDOKU
+            if variant.startswith("polyomino"):
+                self.system_prompt = self.DATA_GEN_SYSTEM_PROMPT_POLYOMINO
+            else:
+                # default: sudoku (also covers legacy unknown variants)
+                self.system_prompt = self.DATA_GEN_SYSTEM_PROMPT_SUDOKU
         else:
             self.system_prompt = SFTFormatter.SYSTEM_PROMPTS[variant]
 
@@ -423,11 +439,19 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Generate SFT data using LLM policy")
+    parser.add_argument("--env", type=str, default="sudoku", choices=["sudoku", "polyomino"],
+                        help="Which environment to generate data for")
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct")
     parser.add_argument("--num-trajectories", type=int, default=100)
     parser.add_argument("--max-steps", type=int, default=30)
-    parser.add_argument("--grid-size", type=int, default=9)
-    parser.add_argument("--difficulty", type=str, default="easy")
+    # Sudoku-specific args
+    parser.add_argument("--grid-size", type=int, default=9, help="(sudoku) grid size — 4 or 9")
+    parser.add_argument("--difficulty", type=str, default="easy", help="(sudoku) difficulty")
+    # Polyomino-specific args
+    parser.add_argument("--board-h", type=int, default=5, help="(polyomino) board height")
+    parser.add_argument("--board-w", type=int, default=4, help="(polyomino) board width")
+    parser.add_argument("--piece-set", type=str, default="L,P,W,Y",
+                        help="(polyomino) comma-separated piece letters; locked easy variant: L,P,W,Y")
     parser.add_argument("--output-dir", type=str, default="data/sudoku_llm_policy")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -437,30 +461,51 @@ def main():
                         help="Use multi-turn conversation format for SFT data")
     parser.add_argument("--max-context-turns", type=int, default=None,
                         help="Max prior turns in multi-turn context (None=all)")
+    parser.add_argument("--variant", type=str, default=None,
+                        help="SFT formatter variant. Default = 'sudoku_full' for sudoku, 'polyomino_minimal' for polyomino.")
     args = parser.parse_args()
 
-    from src.environments.sudoku import SudokuEnv
     from src.data.sft_formatter import SFTFormatter
 
-    print("=" * 60)
-    print("LLM-Policy Sudoku Data Generation")
-    print("=" * 60)
-    print(f"Model: {args.model}")
-    print(f"Trajectories: {args.num_trajectories}")
-    print(f"Max steps: {args.max_steps}")
-    print(f"Grid: {args.grid_size}x{args.grid_size}, difficulty={args.difficulty}")
-    print(f"Output: {args.output_dir}")
-    print(f"Multi-turn: {args.multi_turn}")
-    if args.multi_turn:
-        print(f"Max context turns: {args.max_context_turns or 'all'}")
-    print("=" * 60)
+    # Build env + formatter variant per --env
+    if args.env == "sudoku":
+        from src.environments.sudoku import SudokuEnv
+        env = SudokuEnv(
+            grid_size=args.grid_size,
+            difficulty=args.difficulty,
+            max_steps=args.max_steps,
+        )
+        default_variant = "sudoku_full"
+        env_descr = f"Sudoku grid={args.grid_size}x{args.grid_size}, difficulty={args.difficulty}"
+    elif args.env == "polyomino":
+        from src.environments.polyomino import PolyominoEnv
+        piece_set = tuple(p.strip().upper() for p in args.piece_set.split(","))
+        env = PolyominoEnv(
+            board_h=args.board_h,
+            board_w=args.board_w,
+            piece_set=piece_set,
+            max_steps=args.max_steps,
+        )
+        default_variant = "polyomino_minimal"
+        env_descr = f"Polyomino board={args.board_h}x{args.board_w}, pieces={{{','.join(piece_set)}}}"
+    else:
+        raise ValueError(f"unknown --env: {args.env}")
 
-    # Create environment
-    env = SudokuEnv(
-        grid_size=args.grid_size,
-        difficulty=args.difficulty,
-        max_steps=args.max_steps,
-    )
+    variant = args.variant or default_variant
+
+    print("=" * 60)
+    print(f"LLM-Policy {args.env.title()} Data Generation")
+    print("=" * 60)
+    print(f"Model:         {args.model}")
+    print(f"Trajectories:  {args.num_trajectories}")
+    print(f"Max steps:     {args.max_steps}")
+    print(f"Env:           {env_descr}")
+    print(f"Variant:       {variant}")
+    print(f"Output:        {args.output_dir}")
+    print(f"Multi-turn:    {args.multi_turn}")
+    if args.multi_turn:
+        print(f"  max ctx:     {args.max_context_turns or 'all'}")
+    print("=" * 60)
 
     # Create LLM trajectory generator
     config = LLMTrajectoryConfig(
@@ -468,7 +513,7 @@ def main():
         temperature=args.temperature,
         device=args.device,
     )
-    generator = LLMTrajectoryGenerator(env, config, variant="sudoku_full")
+    generator = LLMTrajectoryGenerator(env, config, variant=variant)
 
     # Generate trajectories
     trajectories = generator.generate_balanced_dataset(
@@ -482,7 +527,7 @@ def main():
 
     # Format for SFT
     print("\nFormatting for SFT...")
-    formatter = SFTFormatter(variant="sudoku_full")
+    formatter = SFTFormatter(variant=variant)
     df = formatter.create_sft_dataset(
         trajectories,
         multi_turn=args.multi_turn,

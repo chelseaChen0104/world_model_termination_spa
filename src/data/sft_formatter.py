@@ -151,6 +151,24 @@ In your reasoning:
 3. Assess whether the resulting state will still be solvable in <solvable>: true/false
 
 Then provide your action in <answer> using format: place N at row R col C""",
+
+        # Pentomino tiling — uses the new tag set (per doc/spec_2026-04-29_pentomino.md §4):
+        # <observation> + <next_state> + <viability> + <answer>. <prediction> renamed to <next_state>;
+        # <solvable> renamed to <viability>. Sudoku variants keep their original tag names for
+        # backwards compatibility with B-0..B-5.
+        'polyomino_minimal': """You are solving a pentomino tiling puzzle. The board is a rectangular grid; you must place the given pentomino pieces so that every cell is covered exactly once, with no overlaps and no piece extending outside the board.
+
+Pieces use the standard letters: F, I, L, N, P, T, U, V, W, X, Y, Z. Each piece is 5 unit squares. Pieces can be rotated and reflected, giving multiple orientations per piece (orientation IDs 0..N-1, deterministic per piece).
+
+Board format: each cell shows '.' for empty or the piece-letter that occupies it. Remaining pieces are listed below the board.
+
+In your reasoning:
+1. Describe the current state in <observation>
+2. Predict the board after your placement in <next_state>
+3. Assess whether the resulting board is still tileable with the remaining pieces in <viability>: true/false
+
+Then provide your action in <answer> using format: place {piece} ori={K} at row {R} col {C}
+where {piece} is one of the remaining pieces, {K} is the orientation id, and (R, C) are 1-indexed anchor coordinates (the anchor is the top-most leftmost cell of the piece's footprint at orientation K).""",
     }
 
     def __init__(self, variant: str = 'full', include_coordinates: bool = True):
@@ -179,18 +197,24 @@ Then provide your action in <answer> using format: place N at row R col C""",
         """
         # Format observation (coordinates only apply to Sokoban grid format)
         is_sudoku = self.variant.startswith('sudoku')
-        if self.include_coordinates and not is_sudoku:
+        is_polyomino = self.variant.startswith('polyomino')
+        if self.include_coordinates and not is_sudoku and not is_polyomino:
             observation = format_state_with_coordinates(step.state)
             prediction = format_state_with_coordinates(step.next_state)
         else:
             observation = step.state
             prediction = step.next_state
 
-        # Build XML parts
+        # Build XML parts.
+        # The state-prediction tag name differs by env family:
+        #   - Sudoku / Sokoban variants:   <prediction>...</prediction>
+        #   - Polyomino (and future MKD):  <next_state>...</next_state>
+        # See doc/spec_2026-04-29_pentomino.md §4 for the rename rationale.
+        next_tag = 'next_state' if is_polyomino else 'prediction'
         xml_parts = [
             "<think>",
             f"<observation>\n{observation}\n</observation>",
-            f"<prediction>\n{prediction}\n</prediction>",
+            f"<{next_tag}>\n{prediction}\n</{next_tag}>",
         ]
 
         # Add termination tags if not baseline (legacy variants only)
@@ -208,13 +232,17 @@ Then provide your action in <answer> using format: place N at row R col C""",
             xml_parts.append(f"<terminate_prob>{term_prob:.2f}</terminate_prob>")
             xml_parts.append(f"<steps_left>{step.steps_left_bucket}</steps_left>")
 
-        # <solvable> tag — included in legacy full variants AND in sudoku_minimal.
-        # Semantics: action-conditional — is_solvable(s_{t+1}) given the action in <answer>.
+        # Solvability / viability tag — same semantic content, different tag name per env family:
+        #   - Sudoku-family variants use <solvable>; polyomino-family use <viability>.
+        # Action-conditional in both cases: is_solvable(s_{t+1}) given the action in <answer>.
+        viab_value = 'true' if step.is_solvable else 'false'
         if self.variant in ['full', 'sudoku_full', 'sudoku_minimal'] and include_breaking_point:
-            xml_parts.append(f"<solvable>{'true' if step.is_solvable else 'false'}</solvable>")
+            xml_parts.append(f"<solvable>{viab_value}</solvable>")
+        if self.variant == 'polyomino_minimal' and include_breaking_point:
+            xml_parts.append(f"<viability>{viab_value}</viability>")
 
-        # <breaking_point> tag — legacy full variants only. Dropped in sudoku_minimal:
-        # the same information is recoverable from the <solvable> time-series at eval.
+        # <breaking_point> tag — legacy full variants only. Dropped in sudoku_minimal /
+        # polyomino_minimal: the same information is recoverable from the time-series at eval.
         if self.variant in ['full', 'sudoku_full'] and include_breaking_point:
             xml_parts.append(f"<breaking_point>{'true' if step.is_breaking_point else 'false'}</breaking_point>")
 
@@ -379,7 +407,12 @@ Then provide your action in <answer> using format: place N at row R col C""",
                 # Format prompt as array of message dicts for verl compatibility
                 prompt = np.array(sample['messages'])
 
-                data_source = 'sudoku' if self.variant.startswith('sudoku') else 'sokoban'
+                if self.variant.startswith('sudoku'):
+                    data_source = 'sudoku'
+                elif self.variant.startswith('polyomino'):
+                    data_source = 'polyomino'
+                else:
+                    data_source = 'sokoban'
                 extra = {
                     'step': sample['metadata']['step'],
                     'is_solvable': sample['metadata']['is_solvable'],

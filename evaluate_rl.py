@@ -51,7 +51,10 @@ def parse_predictions(text):
     if match:
         result["steps_left"] = match.group(1).lower()
 
+    # Accept <solvable> (sudoku) OR <viability> (polyomino, MKD) — same semantics, env-specific tag
     match = re.search(r'<[Ss]olvable>\s*(\w+)', text)
+    if not match:
+        match = re.search(r'<[Vv]iability>\s*(\w+)', text)
     if match:
         val = match.group(1).lower()
         result["solvable"] = val in ["true", "yes", "1"]
@@ -131,23 +134,24 @@ def generate_balanced_eval_set(
     return all_samples
 
 
-def evaluate_solvable_logprob(model, tokenizer, eval_samples, system_prompt, model_name="Model"):
-    """Extract per-sample P(<solvable>=true) and P(<solvable>=false) via teacher-forced
+def evaluate_solvable_logprob(model, tokenizer, eval_samples, system_prompt, model_name="Model",
+                              tag_name: str = "solvable"):
+    """Extract per-sample P(<TAG>=true) and P(<TAG>=false) via teacher-forced
     forward pass — bypasses greedy/sampling and reveals the model's actual confidence
     distribution.
 
+    Args:
+        tag_name: Which XML tag to probe at. Defaults to "solvable" for Sudoku
+            backward-compat. Use "viability" for Polyomino (per spec_2026-04-29_pentomino.md §4).
+
     For each sample:
       1. Build prompt = chat_template([system, user_state])
-      2. Append the response prefix up to and including the literal "<solvable>" string
+      2. Append the response prefix up to and including the literal "<{tag_name}>" string
          (using the parquet's `response` field for samples loaded from parquet)
       3. Single forward pass; read logits at the very next token position
       4. Softmax → P(true), P(false)
 
     Then sweep thresholds τ and report precision/recall at each.
-
-    Requires samples to have a "response" template (i.e., loaded from parquet via
-    --eval-from-parquet). For live-env single-turn samples, this would need extra
-    work to construct a fake response prefix; not implemented here.
     """
     import numpy as np
     print(f"\n{'='*60}")
@@ -180,11 +184,12 @@ def evaluate_solvable_logprob(model, tokenizer, eval_samples, system_prompt, mod
         prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
         response = sample["response"]
-        idx = response.find("<solvable>")
+        target_tag = f"<{tag_name}>"
+        idx = response.find(target_tag)
         if idx < 0:
             skipped += 1
             continue
-        prefix_response = response[: idx + len("<solvable>")]
+        prefix_response = response[: idx + len(target_tag)]
         full_text = prompt_text + prefix_response
 
         inputs = tokenizer(full_text, return_tensors="pt", truncation=True, max_length=4096).to(model.device)
@@ -226,8 +231,8 @@ def evaluate_solvable_logprob(model, tokenizer, eval_samples, system_prompt, mod
         p_false_on_false = [1 - r["p_true"] for r in results if not r["gt_solvable"]]
         print(f"    P(false) on actually-unsolvable: mean={np.mean(p_false_on_false):.3f} median={np.median(p_false_on_false):.3f}")
 
-    # Threshold sweep — predict <solvable>=True if p_true > τ
-    print(f"\n  Threshold sweep (predict <solvable>=True if P(true) > τ):")
+    # Threshold sweep — predict <TAG>=True if p_true > τ
+    print(f"\n  Threshold sweep (predict <{tag_name}>=True if P(true) > τ):")
     print(f"  {'τ':>6} {'Acc':>7} {'Prec(T)':>9} {'Rec(T)':>8} {'Spec':>7} {'F1(T)':>7} {'Prec(F)':>9} {'Rec(F)':>8}")
     print(f"  {'-'*6} {'-'*7} {'-'*9} {'-'*8} {'-'*7} {'-'*7} {'-'*9} {'-'*8}")
     for tau in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]:
@@ -742,9 +747,13 @@ def main():
     # Pass@k-mode args
     parser.add_argument("--n-puzzles", type=int, default=50, help="(pass-at-k) puzzles to evaluate")
     parser.add_argument("--k", default="1,8", help="(pass-at-k) comma-separated k values, e.g. 1,8")
+    parser.add_argument("--grid-size", type=int, default=9, help="(sudoku) grid size — 9 (default) or 4 for SPA-replica setup")
+    parser.add_argument("--difficulty", default="easy", choices=["easy", "medium", "hard"], help="(sudoku) puzzle difficulty")
     parser.add_argument("--max-rollout-steps", type=int, default=30, help="(pass-at-k) max steps per rollout")
     parser.add_argument("--rollout-temperature", type=float, default=0.7, help="(pass-at-k) sampling temperature for k>1")
     parser.add_argument("--max-context-turns", type=int, default=10, help="(pass-at-k) multi-turn sliding window")
+    parser.add_argument("--tag-name", type=str, default="solvable",
+                        help="XML tag to probe in solvable-logprob mode. 'solvable' (default, Sudoku) or 'viability' (Polyomino).")
     # Skip flags
     parser.add_argument("--skip-sft", action="store_true", help="Skip SFT evaluation")
     parser.add_argument("--skip-rl", action="store_true", help="Skip RL evaluation")
@@ -761,7 +770,7 @@ def main():
 
     # ── Env + formatter ──────────────────────────────────────────────
     if args.env == "sudoku":
-        env = SudokuEnv(grid_size=9, difficulty="easy", max_steps=args.max_rollout_steps)
+        env = SudokuEnv(grid_size=args.grid_size, difficulty=args.difficulty, max_steps=args.max_rollout_steps)
         formatter = SFTFormatter(variant="sudoku_full")
     else:  # sokoban
         env = SokobanEnv(dim_room=(6, 6), num_boxes=1, max_steps=100)
@@ -827,6 +836,7 @@ def main():
             lp_results = evaluate_solvable_logprob(
                 mdl, tokenizer, eval_samples, formatter.system_prompt,
                 model_name=f"{label} ({path})",
+                tag_name=args.tag_name,
             )
             bucket["solvable_logprob"] = lp_results
 
