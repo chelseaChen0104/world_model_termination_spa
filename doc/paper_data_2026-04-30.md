@@ -317,7 +317,8 @@ These are blocking for a *complete* paper:
 |---|---|---|---|
 | **B-7 Pass@1 measurement** | ~30 min GPU on autodl1 | SPA-comparable headline number for Pentomino. Currently we have AUC but no Pass@1. | §3.1 table; cross-env story |
 | **B-7 train↔val (s_t, a_t) overlap check** | ~10 min CPU | Disambiguates memorization vs generalization for the AUC=1.0 result. Reduces reviewer attack surface. | §8 caveats; §3.1 footnote |
-| **B-9: 5×5/5-piece Pentomino — full pipeline** | ~1 day total (data gen + SFT + RL) | Tests the "trajectory-length distribution caused B-7 RL collapse" hypothesis (§4.4). If 5×5 RL converges with same v6.1 reward → claim validated. If it also collapses → reward shape itself is the issue, motivating §9.3. | §4.4 mechanism + Claim 4 evidence |
+| **B-7 RL with v7 reward (5×4, 200 steps)** | ~4-5 hours GPU on autodl1 | **First-line fix** for the B-7 collapse: same env, redesigned reward. v7 = symmetric magnitudes (TP=TN=+1.0, FN=FP=−1.0) + per-batch inverse-frequency class balancing + per-valid-step progress bonus (0.1). Targets the three failure mechanisms identified in §4.4: (a) per-class asymmetry biased toward False, (b) doom-state samples dominate gradient (~90% of steps), (c) no incentive to find non-doom actions. If v7 converges (greedy `<viability>` acc stays > 0.9, Pass@1 lifts off 0%) → recipe is reward-engineerable for short-horizon envs and the bigger-board run becomes optional. If v7 ALSO collapses → trajectory-length distribution is the irreducible bottleneck, motivating B-9. | §4.4 mitigation; new "reward design for short-horizon termination RL" sub-claim |
+| **B-9: 5×5/5-piece Pentomino — full pipeline** *(fallback if v7 fails)* | ~1 day total (data gen + SFT + RL) | Run only if v7 also collapses on 5×4. Tests whether the failure is reward-shape-fixable (then v7 should help on 5×5 too) or trajectory-length-driven (then 5×5's longer rollouts ought to fix it even with v6.1). Either outcome validates §4.4 by elimination. | §4.4 mechanism + Claim 4 evidence (only needed if v7 doesn't resolve B-7) |
 | **Phase 2 truncation experiment on B-7** | ~3-4 hours GPU | The project's headline value proposition: does early termination via `<viability>` actually save GPU-hours during RL? Set τ=0.10, count rollouts terminated early, measure compute savings vs no-truncation baseline. **Without this, "compute savings via termination" is a claim, not a finding.** | New §X: "Compute savings from threshold-based truncation" — likely a key paper figure |
 
 ### 9.3 Higher-effort follow-ups (paper-strengthening but not blocking)
@@ -325,7 +326,7 @@ These are blocking for a *complete* paper:
 | Run | Effort | What it tests | Why it matters |
 |---|---|---|---|
 | **B-6: 9×9 + SPA-scale data + SPA hparams** | ~12 hours GPU (need to resume 9×9 data gen first, ~9 hours) | Whether 9×9 is salvageable with full SPA-scale data. Would close the negative result properly. | §3.1 footnote — "we ran the experiment SPA describes for 4×4, but 9×9 plateaus at chance." Strong negative result. |
-| **Reward shape v7 (auxiliary classification head)** | ~2-3 days code + ~1 day GPU | Decouple discrimination from token-level cross-entropy. May fix the per-step asymmetry that broke B-7 RL. | Alternative to the bigger-board fix; potentially shows the recipe can be reward-engineered for short-horizon envs. |
+| **Reward shape v8 (auxiliary classification head)** | ~2-3 days code + ~1 day GPU | If v7 (symmetric + class-balanced + progress bonus) is insufficient, decouple discrimination from token-level cross-entropy entirely via an aux classification head. Stronger but heavier than v7. | Last-resort alternative to v7 / bigger boards if both fail. |
 | **Multi-model scaling (Qwen 0.5B / 3B)** | ~1 day each | Whether the 9×9 failure is task-difficulty or model-capacity. Mirrors SPA's setup. | §8 limitation removal. Strengthens the "Qwen-1.5B can't do 9×9 even at scale" claim. |
 | **Full Pass@1 / Pass@8 sweep matching SPA's Table 5** | ~3-4 hours GPU | Direct comparison to SPA's published numbers. | §5 — currently SPA comparison is asymmetric (we have AUC, they have Pass@1). |
 
@@ -349,9 +350,10 @@ If a deadline forces a choice, here's a triage of must-haves vs nice-to-haves:
 - Train↔val overlap check (1 day)
 - Run A final (already running)
 
-**Strong paper** (+§9.3):
-- Add B-9 (5×5 Pentomino) to validate the trajectory-length hypothesis
-- Add Phase 2 truncation experiment (the "compute savings" headline)
+**Strong paper** (+§9.2 remaining + §9.3):
+- B-7 RL with v7 reward (first-line fix for the collapse — replaces or precedes the bigger-board run)
+- B-9 (5×5 Pentomino) **only if** v7 fails (used as elimination evidence for the trajectory-length hypothesis)
+- Phase 2 truncation experiment (the "compute savings" headline)
 
 **Comprehensive paper** (+§9.3 full):
 - Add 9×9 SPA-scale (B-6) for completeness on the negative result

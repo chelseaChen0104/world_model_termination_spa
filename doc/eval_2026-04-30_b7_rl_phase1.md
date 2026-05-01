@@ -104,7 +104,37 @@ Use `do_rollouts_batched` but discard rollouts of length < 2. Forces the policy 
 
 Add a regularizer that penalizes calibration regression. E.g., add a KL term against the SFT model's `<viability>` distribution specifically. Or add an auxiliary classification head and freeze its weights, using its predictions as an auxiliary reward signal. ~3 days of code.
 
-**My recommendation: Option A.** Bigger boards address the root cause and have research value (does AUC=1.0 hold on harder predictive gaps?). Options B/C are bandages.
+**Updated recommendation (2026-04-30, post-discussion): try Option D (v7 reward) first, then Option A as fallback.** Reward modification is cheaper (~5 hours GPU vs ~1 day) and the collapse mechanism is *gradient-distribution* — it lives at the reward layer, so a reward fix can plausibly resolve it without changing the env. Bigger boards remain the right answer if v7 also fails (then the issue isn't fixable from the reward function alone).
+
+### Option D (proposed first-line fix): Reward shape v7
+
+Implemented in `src/training/rl_trainer_v6.py` (despite the filename — same trainer, v7 is opt-in via `--reward-version v7`). Three changes targeted at the three failure mechanisms above:
+
+1. **Symmetric magnitudes**: TP = +1.0, FN = −1.0, FP = −1.0, TN = +1.0. Removes the intrinsic per-class bias that pulled the policy toward "always False." (v6: TP=+1.0 vs TN=+0.3 was a 3.3× asymmetry favoring doom-prediction.)
+
+2. **Per-batch inverse-frequency class balancing**: After a rollout batch is collected, count GT=True vs GT=False steps and rescale per-step calibration rewards by `total / (2 * max(n_class, 1))`, capped to `[0.5, 5.0]`. With ~90/10 doom/solv composition, a single TN step then carries ~9× the gradient of a single TP step (capped to 5×). Restores parity in expected gradient contribution per class.
+
+3. **Per-step progress bonus**: +0.1 per valid action that advances the trajectory (`action_was_valid=True`). Gives the policy a reason to find actions that *don't* immediately doom the board, increasing exposure to pre-BP solvable states (where the rare TN signal lives). Addresses the "1-step rollouts dominate" problem at its source rather than just rebalancing it.
+
+Expected gradient landscape under v7 (90/10 doom/solv, capped weights):
+| Outcome | Raw reward | After class weight | Frequency-weighted gradient share |
+|---|---|---|---|
+| TP (pred F, GT F) | +1.0 | +0.55 | 50% |
+| FN (pred T, GT F) | −1.0 | −0.55 | (penalty path) |
+| TN (pred T, GT T) | +1.0 | +5.0 | 50% |
+| FP (pred F, GT T) | −1.0 | −5.0 | (penalty path) |
+
+vs v6 unbalanced gradient share (~94% from doom-state TP/FN, ~6% from solvable-state TN/FP).
+
+**How we'll know if it worked**:
+- Greedy `<viability>` accuracy on the 30-puzzle eval set must stay above 0.9 (i.e., no calibration collapse).
+- Rollout solve rate climbs above 0% by step 100.
+- KL stays below 1.0 (no runaway drift).
+- pg_loss remains non-zero (policy keeps learning).
+
+If any of these fail by step 100, fall back to Option A (B-9 5×5 board).
+
+Launcher: `bash scripts/run_rl_b7_phase1.sh` now defaults to `REWARD_VERSION=v7` and writes to `outputs/rl_b7_phase1_v7/` (the failed v6 checkpoint at `outputs/rl_b7_phase1/` is preserved as the negative baseline). Override with `REWARD_VERSION=v6` to reproduce the prior failure.
 
 ## Compute used
 

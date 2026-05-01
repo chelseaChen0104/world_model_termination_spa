@@ -1,7 +1,7 @@
-"""GRPO RL trainer (v6) for Sudoku termination prediction.
+"""GRPO RL trainer (v6/v7) for termination prediction (Sudoku + Polyomino).
 
 Phase 1 of the RL approach (per doc/plan_2026-04-29_rl_approach.md): no rollout
-truncation, multi-step rollouts, v6 reward with task-success bonus.
+truncation, multi-step rollouts.
 
 v6 reward (per rollout = full puzzle attempt):
   per-step:
@@ -12,10 +12,29 @@ v6 reward (per rollout = full puzzle attempt):
         FP (pred F, GT T):  -0.5  (spurious doom)
         TN (pred T, GT T):  +0.3  (correct salvation)
   end-of-trajectory:
-    +10.0 if env.is_solved else 0.0
+    +3.0 if env.is_solved else 0.0  (v6.1: down from +10)
 
-Uses pure transformers (no TRL, no vLLM) to minimize dependency surface for the
-smoke test. If Phase 1 is too slow we can drop in vLLM rollouts as an optimization.
+v7 reward — designed to fix the B-7 Pentomino collapse mode (see
+doc/eval_2026-04-30_b7_rl_phase1.md). When 90% of rollouts terminate in 1 step
+(doom-state-dominated), v6's TP=+1.0 / TN=+0.3 asymmetry biased the policy
+toward "always predict False" and calibration collapsed. v7 fixes:
+
+  1. Symmetric magnitudes — TP=+1.0, FN=-1.0, FP=-1.0, TN=+1.0
+     Removes intrinsic per-class bias.
+
+  2. Per-batch class balancing — within each rollout batch, rescale per-step
+     calibration rewards by inverse GT-class frequency:
+         w_class = total / (2 * max(n_class, 1)),   capped to [floor, cap]
+     A single TN step in a 90/10 doom/solv batch then carries ≈9× the gradient
+     of a single TP step. Cap (default 5.0) prevents one rare-class sample from
+     dominating instability.
+
+  3. Per-step progress bonus — +progress_bonus_per_step per valid action that
+     advances the trajectory (regardless of outcome). Rewards making moves
+     that don't immediately doom the board, so the policy gets exposure to
+     pre-BP solvable states (where TN signal lives).
+
+Uses pure transformers (no TRL, no vLLM).
 """
 from __future__ import annotations
 
@@ -73,9 +92,9 @@ class RLConfig:
     kl_coef: float = 0.05
     max_grad_norm: float = 1.0
 
-    # Reward (v6 → v6.1: success_bonus reduced 10→3 after Phase 1 showed it dominated
-    # the rare-success gradient, while per-step asymmetry caused <solvable> regression
-    # 60.9% → 48.3%. Smaller bonus → more weight on per-step correctness signal.)
+    # Reward — v6 (default) preserves Sudoku tuning; v7 fixes the B-7 Pentomino
+    # collapse caused by short rollouts + per-class asymmetry (see module docstring).
+    reward_version: str = "v6"            # "v6" | "v7"
     tp_reward: float = 1.0
     fn_reward: float = -0.7
     fp_reward: float = -0.5
@@ -83,6 +102,12 @@ class RLConfig:
     format_per_tag: float = 0.05
     success_bonus: float = 3.0
     fail_bonus: float = 0.0
+    # v7 only — inverse-frequency class balancing on per-step calibration reward
+    class_balance: bool = False
+    class_balance_floor: float = 0.5      # min weight (avoid suppressing common class)
+    class_balance_cap: float = 5.0        # max weight (avoid rare-class instability)
+    # v7 only — per-step progress bonus on valid actions that advance the trajectory
+    progress_bonus_per_step: float = 0.0
 
     # Eval / save
     eval_every: int = 50
@@ -161,6 +186,12 @@ class StepRecord:
     # PPO bug fix: cache rollout-time logprobs so PPO ratio is computed correctly.
     # Without this, old_logp == new_logp under the same policy → ratio always 1, no clipping.
     old_logps: Optional[list] = None  # per-token logprobs under the policy AT ROLLOUT TIME
+    # Reward components — kept separately so v7 class-balancing can rescale only
+    # the calibration term and recompute step_reward from the parts.
+    calib_reward: float = 0.0
+    fmt_reward: float = 0.0
+    progress_reward: float = 0.0
+    action_was_valid: bool = False
 
 
 @dataclass
@@ -242,11 +273,13 @@ def do_rollout(
 
         if action is None:
             # Unparseable action — give worst-case step reward and stop.
-            step_r = cfg.fn_reward + fmt_r
+            calib_r = cfg.fn_reward
             steps.append(StepRecord(
                 prompt_text=prompt_text, response_text=response_text, response_ids=response_ids,
                 action=None, pred_solvable=pred, gt_solvable=False, is_breaking_point=False,
-                step_reward=step_r, old_logps=old_logps,
+                step_reward=calib_r + fmt_r, old_logps=old_logps,
+                calib_reward=calib_r, fmt_reward=fmt_r, progress_reward=0.0,
+                action_was_valid=False,
             ))
             break
 
@@ -256,12 +289,15 @@ def do_rollout(
         gt_solvable = bool(info.get("is_solvable", True))
         is_bp = bool(info.get("is_breaking_point", False))
         is_solved = bool(info.get("success", False))
-        sol_r = solvable_reward(pred, gt_solvable, cfg)
+        calib_r = solvable_reward(pred, gt_solvable, cfg)
+        progress_r = cfg.progress_bonus_per_step  # valid action that advanced trajectory
 
         steps.append(StepRecord(
             prompt_text=prompt_text, response_text=response_text, response_ids=response_ids,
             action=action, pred_solvable=pred, gt_solvable=gt_solvable, is_breaking_point=is_bp,
-            step_reward=sol_r + fmt_r, old_logps=old_logps,
+            step_reward=calib_r + fmt_r + progress_r, old_logps=old_logps,
+            calib_reward=calib_r, fmt_reward=fmt_r, progress_reward=progress_r,
+            action_was_valid=True,
         ))
         history.append((obs, response_text))
         obs = next_obs
@@ -429,11 +465,13 @@ def do_rollouts_batched(
             # Pass the raw <answer> string to env.step — each env parses its own action format.
             # If extraction failed (no <answer> tag), fall back to a sentinel that the env will reject.
             if not action_str:
-                step_r = cfg.fn_reward + fmt_r
+                calib_r = cfg.fn_reward
                 r["steps"].append(StepRecord(
                     prompt_text=prompt_text, response_text=text, response_ids=response_ids,
                     action=None, pred_solvable=pred, gt_solvable=False, is_breaking_point=False,
-                    step_reward=step_r, old_logps=old_logps,
+                    step_reward=calib_r + fmt_r, old_logps=old_logps,
+                    calib_reward=calib_r, fmt_reward=fmt_r, progress_reward=0.0,
+                    action_was_valid=False,
                 ))
                 r["alive"] = False
                 continue
@@ -443,14 +481,17 @@ def do_rollouts_batched(
             gt_solvable = bool(info.get("is_solvable", True))
             is_bp = bool(info.get("is_breaking_point", False))
             is_solved = bool(info.get("success", False))
-            sol_r = solvable_reward(pred, gt_solvable, cfg)
+            calib_r = solvable_reward(pred, gt_solvable, cfg) if action_was_valid else cfg.fn_reward
+            progress_r = cfg.progress_bonus_per_step if action_was_valid else 0.0
 
             r["steps"].append(StepRecord(
                 prompt_text=prompt_text, response_text=text, response_ids=response_ids,
                 action=action_str if action_was_valid else None,
                 pred_solvable=pred, gt_solvable=gt_solvable, is_breaking_point=is_bp,
-                step_reward=sol_r + fmt_r if action_was_valid else (cfg.fn_reward + fmt_r),
+                step_reward=calib_r + fmt_r + progress_r,
                 old_logps=old_logps,
+                calib_reward=calib_r, fmt_reward=fmt_r, progress_reward=progress_r,
+                action_was_valid=bool(action_was_valid),
             ))
             r["history"].append((r["obs"], text))
             r["obs"] = next_obs
@@ -469,6 +510,61 @@ def do_rollouts_batched(
             is_solved=r["is_solved"], final_reward=final_reward,
         ))
     return rollouts
+
+
+def rebalance_rewards(rollouts: list, cfg: RLConfig) -> dict:
+    """v7: rescale per-step calibration rewards by inverse GT-class frequency,
+    then recompute step_reward and final_reward in place.
+
+    Counts GT=True (solvable) and GT=False (doom) steps across all rollouts in the
+    batch. Action-invalid steps (no env transition observed) are excluded — their
+    `calib_reward` is the fixed worst-case `fn_reward` and not a true class signal.
+
+    The weight formula `total / (2 * max(n, 1))` makes each class contribute
+    equally in expectation; floor/cap prevent extreme weights when one class is
+    very rare (which would otherwise let a single sample dominate the gradient).
+
+    Returns a small metrics dict for logging.
+    """
+    if not cfg.class_balance:
+        return {"class_balance_applied": False}
+
+    n_solv = 0
+    n_doom = 0
+    for ro in rollouts:
+        for s in ro.steps:
+            if not s.action_was_valid:
+                continue
+            if s.gt_solvable:
+                n_solv += 1
+            else:
+                n_doom += 1
+    total = n_solv + n_doom
+    if total == 0:
+        return {"class_balance_applied": False, "n_solv": 0, "n_doom": 0}
+
+    w_solv = total / (2.0 * max(n_solv, 1))
+    w_doom = total / (2.0 * max(n_doom, 1))
+    floor, cap = cfg.class_balance_floor, cfg.class_balance_cap
+    w_solv = max(floor, min(cap, w_solv))
+    w_doom = max(floor, min(cap, w_doom))
+
+    for ro in rollouts:
+        for s in ro.steps:
+            if not s.action_was_valid:
+                # Keep worst-case calib reward unscaled — these are not class signals.
+                continue
+            w = w_solv if s.gt_solvable else w_doom
+            s.calib_reward = float(s.calib_reward) * w
+            s.step_reward = s.calib_reward + s.fmt_reward + s.progress_reward
+        ro.final_reward = sum(s.step_reward for s in ro.steps)
+        ro.final_reward += cfg.success_bonus if ro.is_solved else cfg.fail_bonus
+
+    return {
+        "class_balance_applied": True,
+        "n_solv": n_solv, "n_doom": n_doom,
+        "w_solv": round(w_solv, 3), "w_doom": round(w_doom, 3),
+    }
 
 
 def _extract_answer(text: str) -> str:
@@ -670,6 +766,15 @@ def main():
     p.add_argument("--kl-coef", type=float, default=0.05)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--eval-every", type=int, default=25)
+    # v7 reward (recommended for short-rollout envs like Pentomino)
+    p.add_argument("--reward-version", default="v6", choices=["v6", "v7"],
+                   help="v6 = per-class asymmetric (Sudoku-tuned); "
+                        "v7 = symmetric magnitudes + class-balanced + progress bonus "
+                        "(fixes B-7 Pentomino collapse).")
+    p.add_argument("--progress-bonus", type=float, default=None,
+                   help="Override progress bonus per valid step. Defaults: v6=0.0, v7=0.1.")
+    p.add_argument("--class-balance-cap", type=float, default=5.0,
+                   help="Cap on inverse-frequency class weight (v7).")
     args = p.parse_args()
 
     cfg = RLConfig(
@@ -684,7 +789,21 @@ def main():
         kl_coef=args.kl_coef,
         seed=args.seed,
         eval_every=args.eval_every,
+        reward_version=args.reward_version,
+        class_balance_cap=args.class_balance_cap,
     )
+
+    # Apply v7 reward defaults (per module docstring): symmetric magnitudes,
+    # class balancing on, progress bonus on. Individual overrides via CLI/env still apply.
+    if cfg.reward_version == "v7":
+        cfg.tp_reward = 1.0
+        cfg.fn_reward = -1.0
+        cfg.fp_reward = -1.0
+        cfg.tn_reward = 1.0
+        cfg.class_balance = True
+        cfg.progress_bonus_per_step = 0.1 if args.progress_bonus is None else args.progress_bonus
+    elif args.progress_bonus is not None:
+        cfg.progress_bonus_per_step = args.progress_bonus
 
     # Setup
     os.makedirs(cfg.output_dir, exist_ok=True)
@@ -760,6 +879,11 @@ def main():
         )
 
         rollout_time = time.time() - t0
+
+        # v7: rescale per-step calibration rewards by inverse GT-class frequency
+        # before computing GRPO advantages. No-op when cfg.class_balance is False.
+        cb_metrics = rebalance_rewards(rollouts, cfg)
+
         rewards = np.array([r.final_reward for r in rollouts])
         solved_rate = sum(1 for r in rollouts if r.is_solved) / len(rollouts)
 
@@ -781,6 +905,7 @@ def main():
             "solved_rate": float(solved_rate),
             "adv_min": float(min(advs)),
             "adv_max": float(max(advs)),
+            **cb_metrics,
             **ppo_metrics,
         }
         print(f"step {step:4d} | reward {log['reward_mean']:+.2f}±{log['reward_std']:.2f} | "
