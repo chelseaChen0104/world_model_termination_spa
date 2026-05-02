@@ -167,6 +167,57 @@ point, see [HANDOFF.md](HANDOFF.md).
 
 ---
 
+## SFT runs (Hidato)
+
+### B-H1 🔄 (in flight, third game)
+
+- **Goal**: First Hidato model — test whether the recipe transfers to a *third*
+  game type (after Sudoku and Pentomino) where greedy argmax is naturally
+  forced by adjacency constraints. Hidato (Numbrix variant) places sequential
+  numbers 1..N on a grid such that consecutive numbers are orthogonally
+  adjacent. Action space per step is small (≤4 adjacent cells, often only 1-3
+  viable). Picked over Kakuro on 2026-05-01 for simpler representation.
+- **Status**: 🔄 **in flight on autodl1**, ~1.5-2 hr ETA. Started 2026-05-01.
+- **Hparameters**: Same as B-5/B-7/B-8 SPA-recipe — Qwen2.5-1.5B-Instruct,
+  **lr=1e-4, ep=5, bs=16 effective** (per_device=4 × grad_accum=4),
+  max_length=1024, eval_steps=25.
+- **Data**: `data/hidato_b_h1_combined/wm_train_no_post_bp.parquet` (built by
+  [scripts/combine_hidato_with_augmented.py](../scripts/combine_hidato_with_augmented.py)):
+  - **LLM-policy data** (3000 attempts, ~67 min on H800):
+    `data/hidato_llm_policy_minimal/wm_train_no_post_bp.parquet` =
+    9,627 train + 2,407 val, **75% solvable / 25% doom**, step distribution
+    0-11 (rich multi-step coverage unlike B-7's 80% step-0).
+  - **Solution-path augmented** (built by `hidato_solution_path_augmenter.py`):
+    walks each of 8 hand-curated puzzles through its known solution → 80 unique
+    train samples uniformly across step 0-16. Oversampled 30× → 2,400.
+  - **Combined**: 12,027 train + 2,617 val, **80% solvable / 20% doom**.
+- **Checkpoint**: pending (`outputs/sft_hidato_b_h1/final/` on autodl1).
+- **Result**: pending. Success criteria:
+  - AUC ≥ 0.95 (calibration on viability prediction)
+  - **Greedy Pass@1 > 0%** (this is the key — Pentomino was 0%, Hidato should
+    benefit from forced moves)
+  - Pass@1 stochastic > B-7 SFT's 0%
+- **Notes**:
+  - Predictive-gap test (200 random rollouts on the puzzle bank):
+    67% doom rate, 29% success rate (success_bonus will fire during RL),
+    mean rollout length 5.32 steps. Healthy.
+  - Hidato puzzles in our bank have **unique solutions**, which actually helps
+    greedy: each state has a single argmax-correct cell, so a well-trained
+    model can concentrate probability on it. Risk: less SFT data diversity
+    (8 paths vs Pentomino's 20 tilings); model might memorize. If so,
+    expand bank by varying given patterns (~30 min code).
+  - LLM-policy data showed **0 successful trajectories** (Qwen2.5 can't
+    complete a Hidato puzzle even with 3000 attempts), but unlike B-7, the
+    intermediate states are well-distributed (75% solvable, step distribution
+    0-11). Augmentation adds the missing positive completion examples.
+  - Spec: [spec_2026-05-01_hidato.md](spec_2026-05-01_hidato.md).
+- **Pending follow-ups after SFT lands**:
+  1. Logprob threshold sweep + sanity rollout test
+  2. RL with v8 anchor (or v8.2 if v8 collapses on Hidato)
+  3. Truncation experiment
+
+---
+
 ## RL runs (Sudoku)
 
 ### Phase 1 v6 (deprecated)

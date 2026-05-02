@@ -147,6 +147,14 @@ class RLConfig:
     bf16: bool = True
     truncation_mode: str = "off"      # 'off' | 'conservative' (Phase 2)
     truncation_threshold: float = 0.95
+    # Minimum step count before the gate is allowed to fire. Default 0 = fire on
+    # any step. Set to 3+ to avoid killing rollouts early (when the model has
+    # less context to make a confident doom-prediction). Mitigates the
+    # bimodal-confidence problem observed in the τ-sweep on v8 anchor: the gate
+    # was firing identically at τ=0.95 vs 0.9999 because the model's confidence
+    # is binary, NOT graded — but trajectory position is a different axis we
+    # can gate on.
+    truncation_min_step: int = 0
 
 
 # ----------------------------------------------------------------------------
@@ -427,8 +435,11 @@ def do_rollout(
 
         # Phase 2 truncation gate — same logic as do_rollouts_batched (see there
         # for full comment). Only fires under truncation_mode='conservative'.
+        # Optional: only fire after rollout has accumulated `min_step` steps
+        # (trajectory-position-aware truncation; default 0 = no min).
         if (cfg.truncation_mode == "conservative"
                 and pred is False and not is_solved and not done
+                and len(steps) >= cfg.truncation_min_step
                 and via_pos and old_logps
                 and via_pos[0] < len(old_logps)):
             false_logp = old_logps[via_pos[0]]
@@ -643,6 +654,7 @@ def do_rollouts_batched(
             if (cfg.truncation_mode == "conservative"
                     and pred is False and not is_solved and not done
                     and action_was_valid
+                    and len(r["steps"]) >= cfg.truncation_min_step
                     and via_pos and old_logps
                     and via_pos[0] < len(old_logps)):
                 false_logp = old_logps[via_pos[0]]
@@ -1072,6 +1084,11 @@ def main():
     p.add_argument("--truncation-threshold", type=float, default=None,
                    help="Probability threshold for the truncation gate. "
                         "Truncates if logp(false_token) > log(threshold). Default 0.95.")
+    p.add_argument("--truncation-min-step", type=int, default=None,
+                   help="Trajectory-position-aware truncation: only fire the "
+                        "gate after rollout has accumulated this many steps. "
+                        "Set to 3+ to avoid killing rollouts at step 1-2 when "
+                        "model has less context. Default 0 (gate fires anytime).")
     args = p.parse_args()
 
     cfg = RLConfig(
@@ -1121,6 +1138,8 @@ def main():
         cfg.truncation_mode = args.truncation_mode
     if args.truncation_threshold is not None:
         cfg.truncation_threshold = args.truncation_threshold
+    if args.truncation_min_step is not None:
+        cfg.truncation_min_step = args.truncation_min_step
 
     # Setup
     os.makedirs(cfg.output_dir, exist_ok=True)
