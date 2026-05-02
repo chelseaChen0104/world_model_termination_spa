@@ -174,10 +174,99 @@ This is the table for the paper's Phase 2 truncation section.
 
 ---
 
+## τ-sweep finding (2026-05-01) — bimodal confidence
+
+After Option B, we ran a τ-sweep at {0.95, 0.99, 0.999, 0.9999} on the v8
+anchor checkpoint to characterize the savings/quality Pareto frontier. Result:
+
+| condition | rollout_time | tokens/step | mean_len | truncated | per-batch solve |
+|---|---|---|---|---|---|
+| OFF (baseline) | 15.51 s | 16,014 | 4.48 | 0 / 320 (0.0%) | 40.3% |
+| τ=0.95 | 14.36 s | 12,575 | 3.52 | 173 / 320 (54.1%) | 33.1% |
+| τ=0.99 | 14.15 s | 12,483 | 3.50 | 177 / 320 (55.3%) | 32.2% |
+| τ=0.999 | 14.33 s | 12,529 | 3.51 | 176 / 320 (55.0%) | 32.2% |
+| τ=0.9999 | 14.25 s | 12,416 | 3.48 | 178 / 320 (55.6%) | 32.8% |
+
+**All τ values from 0.95 → 0.9999 give nearly identical results** — ~55%
+truncation rate, ~22% token savings, ~7-8 pp solve cost across the board.
+
+The reason: the v8 anchor checkpoint's `<solvable>=False` predictions are
+**bimodal in confidence**. When the model says False, it's almost always
+> 99.99% confident (logp(false) > log(0.9999)). There's no middle confidence
+band where τ tuning would matter. This is a side effect of the v8
+single-token anchor mechanism (preserves logp of sampled token, but the
+unsampled token's logp drifts to extreme values).
+
+**Implication**: τ tuning alone won't reduce the −10pp Pass@1 cost. The
+remedies are either (a) a stronger calibration mechanism (v8.2 dual-token
+anchor — implemented, pending RL run), or (b) a different gate condition
+that doesn't depend solely on the bimodal confidence — see next section.
+
+---
+
+## Trajectory-position-aware truncation gate (`--truncation-min-step`)
+
+Added 2026-05-01 as an alternative dimension to gate on (since τ alone
+doesn't fine-tune): **only fire the truncation gate after a rollout has
+accumulated some minimum number of steps**. Hypothesis: rollouts that look
+doomed at step 1 are sometimes recoverable; truncating only at step ≥ 3
+lets those rollouts run a bit longer before the gate kicks in.
+
+### Implementation
+
+- New config field [`RLConfig.truncation_min_step: int = 0`](../src/training/rl_trainer_v6.py)
+  (default 0 = current behavior, fire on any step).
+- Both rollout paths (`do_rollout` and `do_rollouts_batched`) check
+  `len(steps) >= cfg.truncation_min_step` before firing the gate.
+- New CLI flag `--truncation-min-step N` (composable with any reward version
+  and with `--truncation-mode conservative`).
+
+### Min-step sweep experiment
+
+Sweeps `min_step ∈ {0, 1, 2, 3, 4}` at fixed τ=0.99, 10 rollout-collection
+steps each, on the v8 anchor checkpoint. Currently in flight on autodl2.
+Launcher: [scripts/run_truncation_min_step_sweep.sh](../scripts/run_truncation_min_step_sweep.sh).
+
+### Expected outcome
+
+If the gate fires a lot of *premature* truncations (rollouts that would
+have recovered if allowed to continue), `min_step=3` should:
+- Truncate fewer rollouts (e.g., 30-40% instead of 55%)
+- Preserve more per-batch solve rate (closer to OFF's 40% than ON's 33%)
+- Save somewhat less compute (lower truncation rate → less savings)
+
+If the gate is already only firing on truly-doomed rollouts (no
+premature truncations), `min_step=3` should:
+- Truncate similar fraction (since the model only says False with high
+  confidence on actually-doomed states)
+- No meaningful change in solve rate or savings
+
+The result discriminates between two interpretations of the −10pp Pass@1
+cost: structural-doom-classification vs eval-time premature termination.
+
+### Combined with v8.2 anchor
+
+Independent axis: v8.2 (dual-token anchor) addresses the *bimodality*
+of confidence directly by anchoring both `>true` and `>false` logprobs.
+Min-step gates orthogonally on *trajectory position*. Both can be combined
+(`--reward-version v8 --dual-token-anchor --truncation-min-step 3`) for
+a v8.2 + min-step combined gate experiment.
+
+### Status (2026-05-01)
+
+- [x] Trainer code patched (`truncation_min_step` config + CLI flag)
+- [x] Sweep launcher written (`run_truncation_min_step_sweep.sh`)
+- [ ] Sweep results (in flight on autodl2 at time of writing)
+
+---
+
 ## Open questions for follow-up
 
-1. **τ-sweep**: τ ∈ {0.95, 0.99, 0.999, 0.9999} — characterizes the savings/quality
-   Pareto frontier. Currently only one point measured. ~3 hr GPU.
+1. **τ-sweep** (DONE — bimodal confidence; tuning τ alone doesn't help).
+2. **min-step sweep** (in flight; will inform whether premature-termination
+   is the dominant cost driver).
+3. **v8.2 dual-token anchor** (implemented, pending RL run; addresses the
+   underlying bimodality).
 2. **Eval-during-training fix**: patch `quick_pass1()` to always run with
    truncation_mode=off, so eval Pass@1 in training logs is clean by default.
    Future runs would not need a separate re-eval. ~10 min code.
