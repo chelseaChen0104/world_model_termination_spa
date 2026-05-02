@@ -169,6 +169,23 @@ In your reasoning:
 
 Then provide your action in <answer> using format: place {piece} ori={K} at row {R} col {C}
 where {piece} is one of the remaining pieces, {K} is the orientation id, and (R, C) are 1-indexed anchor coordinates (the anchor is the top-most leftmost cell of the piece's footprint at orientation K).""",
+
+        # Hidato (Numbrix variant) — sequential number-fill on a grid.
+        # Uses the Sudoku-style tag set (<observation> + <prediction> + <solvable> + <answer>)
+        # since it's a constraint-satisfaction puzzle.
+        'hidato_minimal': """You are solving a Hidato (number-path) puzzle. The board is a rectangular grid where you must fill in numbers from 1 to N (where N = rows × cols) so that consecutive numbers (k and k+1) are placed in cells that share an edge (orthogonally adjacent — up, down, left, or right).
+
+Grid format: each cell shows its placed number, or '.' for empty.
+
+You place numbers in sequential order (1, then 2, then 3, ...). Some cells are pre-filled (givens) and don't need to be placed; the env will skip past them. Each step you place the next required number into an empty cell that's adjacent to the previous number's cell.
+
+In your reasoning:
+1. Describe the current state in <observation>
+2. Predict the next state after your move in <prediction>
+3. Assess whether the resulting state will still be solvable (all remaining numbers can be placed legally) in <solvable>: true/false
+
+Then provide your action in <answer> using format: place {N} at row {R} col {C}
+where {N} is the next sequential number to place and (R, C) are 1-indexed cell coordinates.""",
     }
 
     def __init__(self, variant: str = 'full', include_coordinates: bool = True):
@@ -198,7 +215,8 @@ where {piece} is one of the remaining pieces, {K} is the orientation id, and (R,
         # Format observation (coordinates only apply to Sokoban grid format)
         is_sudoku = self.variant.startswith('sudoku')
         is_polyomino = self.variant.startswith('polyomino')
-        if self.include_coordinates and not is_sudoku and not is_polyomino:
+        is_hidato = self.variant.startswith('hidato')
+        if self.include_coordinates and not is_sudoku and not is_polyomino and not is_hidato:
             observation = format_state_with_coordinates(step.state)
             prediction = format_state_with_coordinates(step.next_state)
         else:
@@ -236,7 +254,7 @@ where {piece} is one of the remaining pieces, {K} is the orientation id, and (R,
         #   - Sudoku-family variants use <solvable>; polyomino-family use <viability>.
         # Action-conditional in both cases: is_solvable(s_{t+1}) given the action in <answer>.
         viab_value = 'true' if step.is_solvable else 'false'
-        if self.variant in ['full', 'sudoku_full', 'sudoku_minimal'] and include_breaking_point:
+        if self.variant in ['full', 'sudoku_full', 'sudoku_minimal', 'hidato_minimal'] and include_breaking_point:
             xml_parts.append(f"<solvable>{viab_value}</solvable>")
         if self.variant == 'polyomino_minimal' and include_breaking_point:
             xml_parts.append(f"<viability>{viab_value}</viability>")
@@ -411,6 +429,8 @@ where {piece} is one of the remaining pieces, {K} is the orientation id, and (R,
                     data_source = 'sudoku'
                 elif self.variant.startswith('polyomino'):
                     data_source = 'polyomino'
+                elif self.variant.startswith('hidato'):
+                    data_source = 'hidato'
                 else:
                     data_source = 'sokoban'
                 extra = {

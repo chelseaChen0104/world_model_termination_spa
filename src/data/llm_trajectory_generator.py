@@ -82,6 +82,21 @@ class LLMTrajectoryGenerator:
         "Output ONLY the <answer>...</answer> tag. No reasoning, no extra text, no other tags."
     )
 
+    DATA_GEN_SYSTEM_PROMPT_HIDATO = (
+        "You are solving a Hidato (number-path) puzzle. The user will show you a grid where "
+        "filled cells contain integers and empty cells are shown as `.`. The goal is to fill "
+        "every empty cell with an integer from 1 to N (= rows * cols) such that consecutive "
+        "numbers (k and k+1) are placed in cells that share an edge (orthogonal adjacency: "
+        "up/down/left/right).\n\n"
+        "On each turn you place ONE number — specifically the next sequential number not yet "
+        "on the board — into an empty cell adjacent to the previous number's cell. "
+        "Output your move EXACTLY in this format:\n"
+        "<answer>place {N} at row {R} col {C}</answer>\n"
+        "where {N} is the next sequential number to place and (R, C) are 1-indexed cell "
+        "coordinates.\n\n"
+        "Output ONLY the <answer>...</answer> tag. No reasoning, no extra text, no other tags."
+    )
+
     def __init__(self, env, config: Optional[LLMTrajectoryConfig] = None,
                  variant: str = "sudoku_full"):
         """
@@ -102,6 +117,8 @@ class LLMTrajectoryGenerator:
         if self.config.use_minimal_data_gen_prompt:
             if variant.startswith("polyomino"):
                 self.system_prompt = self.DATA_GEN_SYSTEM_PROMPT_POLYOMINO
+            elif variant.startswith("hidato"):
+                self.system_prompt = self.DATA_GEN_SYSTEM_PROMPT_HIDATO
             else:
                 # default: sudoku (also covers legacy unknown variants)
                 self.system_prompt = self.DATA_GEN_SYSTEM_PROMPT_SUDOKU
@@ -439,7 +456,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Generate SFT data using LLM policy")
-    parser.add_argument("--env", type=str, default="sudoku", choices=["sudoku", "polyomino"],
+    parser.add_argument("--env", type=str, default="sudoku", choices=["sudoku", "polyomino", "hidato"],
                         help="Which environment to generate data for")
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct")
     parser.add_argument("--num-trajectories", type=int, default=100)
@@ -488,6 +505,11 @@ def main():
         )
         default_variant = "polyomino_minimal"
         env_descr = f"Polyomino board={args.board_h}x{args.board_w}, pieces={{{','.join(piece_set)}}}"
+    elif args.env == "hidato":
+        from src.environments.hidato import HidatoEnv
+        env = HidatoEnv(max_steps=args.max_steps)
+        default_variant = "hidato_minimal"
+        env_descr = f"Hidato (puzzle bank from src/environments/hidato_puzzle_bank.py)"
     else:
         raise ValueError(f"unknown --env: {args.env}")
 
