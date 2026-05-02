@@ -1,0 +1,60 @@
+{
+  "config": {
+    "checkpoint": "outputs/rl_b8_v8_anchor/final",
+    "n_puzzles": 50,
+    "group_size": 8,
+    "n_rollouts": 400,
+    "temperature": 0.7,
+    "board": "5x4",
+    "piece_set": [
+      "L",
+      "P",
+      "W",
+      "Y"
+    ],
+    "seed": 4242
+  },
+  "rollout_lengths": {
+    "histogram": {
+      "3": 163,
+      "4": 237
+    },
+    "mean": 3.592,
+    "median": 4
+  },
+  "first_action_doom_rate": {
+    "n_rollouts_with_first_action": 400,
+    "n_first_action_doom": 0,
+    "rate": 0.0
+  },
+  "per_step_class_composition": {
+    "n_solv": 1274,
+    "n_doom": 163,
+    "solv_frac": 0.8866,
+    "doom_frac": 0.1134
+  },
+  "pass_at_1": {
+    "n_solved": 237,
+    "n_total": 400,
+    "rate": 0.5925
+  },
+  "viability_prediction": {
+    "accuracy": 1.0,
+    "n_total_predictions": 1437,
+    "frac_predicted_true": 0.8866
+  },
+  "counterfactual_expected_per_step_reward": {
+    "v6": {
+      "always_true": 0.1866,
+      "always_false": -0.3299,
+      "oracle": 0.3794,
+      "sft_actual": 0.3794
+    },
+    "v7": {
+      "always_true": 0.7731,
+      "always_false": -0.7731,
+      "oracle": 1.0,
+      "sft_actual": 1.0
+    }
+  }
+}
