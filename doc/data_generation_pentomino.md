@@ -16,12 +16,44 @@
 | **Pilot** | 3000 / 1000 / 1000 | Paper trend validation | Viability AUC differentiates by model size + SAVE ≥ score baseline on deceptive subset |
 | **Paper-final** | 8000 / 1500 / 1500 | Stable submission numbers | Paper claims hold; numbers stable across reseeded runs |
 
-5×6 records-per-state ratio at each stage (estimated from 172 subsets × ~30 reachable boundary states/subset ≈ 5000 unique states pool):
-- Toy 2500 / ~1500 unique boundary states ≈ 1.7 (excellent)
-- Pilot 5000 / ~3000 unique boundary states ≈ 1.7 (excellent)
-- Paper-final 11000 / ~5000 unique boundary states ≈ 2.2 (good)
+### State coverage and scaling — Pentomino is mathematically capped
 
-This is much healthier than the 5×4 setup and is the primary motivation for the migration.
+**Hard cap: 172 valid 6-piece subsets at 5×6** (out of C(12,6)=924 possible subsets, only 172 actually tile a 5×6 rectangle). This is a math fact, not a bank-size choice.
+
+The default data-generation pipeline uses `solver_find_one_solution(state)`, which is **deterministic** for a given (subset, board). So different `root_idx` values that pick the same subset produce **identical trajectories**. With:
+- 172 unique subsets × ≤3 sibling-sets per trajectory (`sibling_sets_per_root` cap) = **~516 unique sibling-set records max**
+
+That's well below pilot's 5000-record target — the default flow alone **cannot** reach pilot scale.
+
+#### Honest taxonomy of expansion options
+
+The earlier doc claimed pre-placed-piece variants would "expand state coverage". That claim is **wrong**: every state reachable from a 1-piece-given start is also reachable by walking from blank (placing that piece first). Pre-placing rearranges *anchor points* over the same state pool — it doesn't expand the set of reachable states.
+
+| Option | New trajectories? | New states? | Effort |
+|---|---|---|---|
+| **(a) Pre-placed-piece variants** — pre-place 1 piece from a random tiling's first step | ✅ | ❌ (already reachable from blank) | small |
+| **(b) Multi-tiling per subset** — call `find_all_tilings` (up to N), walk each | ✅ | ✅ (different orderings reach off-canonical-path states) | small |
+| **(c) Stochastic policy walks** — π_θ at T=0.3 walks, anchor sibling sets at boundary states found mid-walk | ✅ | ✅ (off-solver-path states, including doomed branches) | medium |
+| **(d) (b) + (c)** | ✅ | ✅ ✅ widest | medium |
+
+#### Decision (2026-05-04): use (a) only for now
+
+Per user directive, the current implementation uses **option (a) — pre-placed-piece variants**. Each root picks a subset, finds up to 8 distinct tilings, picks one at random, and pre-places that tiling's first piece. The trajectory then runs 5 more steps from that pre-placed state.
+
+This adds anchor-point diversity without expanding actual state coverage. Records-per-state will be high; we accept that for now to unblock pilot data generation. If toy → pilot → paper-final shows memorization or weak deceptive-pair separation, the next escalation is (b) multi-tiling, then (c) stochastic walks.
+
+The π_θ SFT pipeline does use multi-tiling (option (b)) — see `--augment` flag in `scripts/generate_pi_theta_sft_pentomino.py`. The choice not to use (b) for SAVE data gen is deliberate: SAVE data targets sibling-set viability supervision, not full-trajectory imitation, so anchor diversity (a) matters more than tiling diversity (b) at this stage.
+
+#### Records-per-state estimates (with option (a))
+
+Roughly:
+- **Toy** 2500 records / ~516 sol-path states + ~172 × 8 pre-placed states ≈ 2000 unique states. Ratio ~1.25.
+- **Pilot** 5000 records / ~2000 unique states. Ratio ~2.5.
+- **Paper-final** 11000 records / ~2000 unique states. Ratio ~5.5 (high; consider option (b) or (c) before paper-final).
+
+This contrasts with Sudoku (procedural, no bank, scales naturally) and Hidato (bank-driven, 600-puzzle bank for pilot, may need 1000-puzzle bank for paper-final).
+
+### π_θ SFT data scale
 
 ### π_θ SFT data scale
 

@@ -162,15 +162,55 @@ def get_env_adapter(env_name: str):
                     _valid_subsets_cache.append(combo)
             return _valid_subsets_cache
 
+        # Cache: subset -> list of distinct full tilings (used for pre-place expansion).
+        _tilings_cache: dict = {}
+        def _get_tilings(subset: tuple, max_tilings: int = 8):
+            key = subset
+            if key in _tilings_cache:
+                return _tilings_cache[key]
+            from scripts.generate_pi_theta_sft_pentomino import find_all_tilings
+            tilings = find_all_tilings(subset, _BOARD_H, _BOARD_W, max_tilings=max_tilings)
+            _tilings_cache[key] = tilings
+            return tilings
+
         def _pentomino_root(seed: int, h: int, w: int, k_pieces: int) -> dict:
-            """Pick a random valid k-piece subset for the (h, w) board."""
+            """Pick a random valid k-piece subset for the (h, w) board.
+
+            Pre-placed-piece expansion (per data_generation_pentomino.md
+            'Decision (2026-05-04): use (a) only for now'):
+              - When env var PENT_PRE_PLACE=1 (default ON), find up to 8
+                distinct tilings for the chosen subset, pick one at random,
+                pre-place its first piece, and return the resulting state.
+                This adds anchor-point diversity but does NOT expand the
+                set of reachable states (every pre-placed state is also
+                reachable by placing-that-piece-first from the empty board).
+              - When PENT_PRE_PLACE=0, return the empty-board root (legacy).
+            """
             subsets = _get_valid_subsets()
             if not subsets:
                 raise RuntimeError(
                     f"No valid {k_pieces}-piece subsets tile {h}×{w}")
             rng = _random.Random(seed)
-            subset = list(rng.choice(subsets))
-            return {"board": env_mod.empty_board(h, w), "remaining_pieces": subset}
+            subset = tuple(rng.choice(subsets))
+
+            pre_place = os.environ.get("PENT_PRE_PLACE", "1") != "0"
+            if pre_place:
+                tilings = _get_tilings(subset, max_tilings=8)
+                if tilings:
+                    # Use seed-based selection for reproducibility.
+                    tiling = tilings[rng.randrange(len(tilings))]
+                    first_piece, ori_id, ar, ac = tiling[0]
+                    from src.environments.polyomino_utils import placement_cells
+                    board = env_mod.empty_board(h, w)
+                    cells = placement_cells(first_piece, ori_id, ar, ac)
+                    if cells is not None:
+                        for cr, cc in cells:
+                            board[cr][cc] = first_piece
+                        remaining = [p for p in subset if p != first_piece]
+                        return {"board": board, "remaining_pieces": remaining}
+
+            # Fallback / explicit empty-board root.
+            return {"board": env_mod.empty_board(h, w), "remaining_pieces": list(subset)}
         AS = env_mod.ActionStruct
         SYS_PENT = (
             "You are solving a pentomino tiling puzzle. The board is a rectangular grid; "

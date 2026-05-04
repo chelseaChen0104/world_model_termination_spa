@@ -14,12 +14,26 @@
 | **Pilot** | 3000 / 1000 / 1000 | Paper trend validation | Viability AUC differentiates by model size + SAVE ≥ score baseline on deceptive subset |
 | **Paper-final** | 8000 / 1500 / 1500 | Stable submission numbers | Paper claims hold; numbers stable across reseeded runs |
 
-Hidato-specific scaling: with the 200-puzzle bank (140 train / 30 val / 30 test puzzles), and ~14 anchor states per puzzle:
-- Toy 1500 train / ~500 train-puzzle-anchor states ≈ 3 (healthy)
-- Pilot 3000 / ~500 states ≈ 6 (healthy)
-- Paper-final 8000 / ~500 states ≈ 16 (high; consider expanding bank to ~500 puzzles for paper-final)
+### State coverage and scaling — Hidato uses a fixed puzzle bank
 
-If paper-final ratio is a concern, the same `scripts/expand_hidato_bank.py` runs again with `--n-puzzles 500` (~5min compute).
+Hidato uses an **algorithmically generated puzzle bank** under `data/hidato_bank_5x4_<ver>/bank.py`. The bank is loaded by [scripts/hidato5x4_env.py](../scripts/hidato5x4_env.py); env var `HIDATO_BANK=<ver>` selects which bank version to use (default `v3` if present, else `v2`, else legacy 8-puzzle fallback).
+
+Bank versions in use as of 2026-05-04:
+- **v2** (200 puzzles, seed=42): used for toy data (`hidato5x4_env_v2_200puzzles`)
+- **v3** (600 puzzles, seed=42): used for pilot data (`hidato5x4_env_v3_600puzzles`). v3 is a strict superset of v2 — the algorithm is deterministic, so v3[0..199] == v2[0..199] byte-for-byte; v3 adds 400 new puzzles beyond v2.
+
+**Bank ceilings** (records achievable, given `K_max_sibling_sets_per_puzzle=12` and the 70/15/15 split):
+- v2 (200): train 1680, val 360, test 360 → caps toy val/test at 360 (we observed 346/345)
+- v3 (600): train 5040, val 1080, test 1080 → comfortable for pilot 3000/1000/1000
+- For paper-final 8000/1500/1500: train and val/test ceilings of v3 (5040 / 1080) are below paper-final targets. **A v4 bank with ≥1000 puzzles will be needed** (1000×0.7×12=8400 train, 1000×0.15×12=1800 val/test).
+
+**Train/val/test split is at the trajectory level, not the puzzle level.** The split uses `root_idx` ranges (70/15/15), but `puzzle = bank[root_idx % len(bank)]` — meaning train and val/test cycle through the same puzzle pool. Leakage prevention works at the **state level**: different trajectory seeds produce different stochastic walks from the same puzzle, so val/test sample different boundary-state anchors than train.
+
+**Toy/pilot puzzle overlap**: because v3 is a superset of v2, the toy dataset (v2) shares its first 200 puzzles with the pilot dataset (v3). When evaluating, train and eval should both use pilot's val/test (or both use toy's val/test) — don't cross-evaluate toy-trained vs pilot-eval or vice versa, as that would have puzzle-level leakage on the shared 200.
+
+To expand the bank: `scripts/expand_hidato_bank.py --rows 5 --cols 4 --n-puzzles N --seed 42 --output data/hidato_bank_5x4_v<N>/bank.py`. Runs in ~5 min for N=1000.
+
+This contrasts with Sudoku (procedural generation, no bank, scales naturally) and Pentomino (math-capped at 172 valid subsets at 5×6, requires per-trajectory expansion).
 
 ---
 

@@ -16,6 +16,23 @@ Each stage gates the next. **Don't scale up if the current stage's gate fails �
 
 For Sudoku 4×4 specifically, all three stages use the same `--n-target` flag mechanism on `scripts/generate_save_data.py`; only the integer changes. No piece-set or board-size axis to vary, so scaling is straightforward (unlike Pentomino).
 
+### State coverage and scaling — Sudoku has no bank
+
+Sudoku does **not** use a fixed puzzle bank. `generate_root_puzzle(seed=puzzle_seed, n_empty=6)` procedurally constructs a fresh 4×4 puzzle for each `puzzle_seed`. The space of (filled solution × 6-empty pattern) is large enough (~10⁶ combinations) that collisions across seeds are negligible.
+
+Empirical (toy stage, 2026-05-04 generation):
+- Toy 2500 records → **2498 unique states** (validated)
+- 0 schema violations
+- Records-per-state ratio ~1.0 — every record is a near-unique anchor
+
+Predicted at higher scales:
+- Pilot 5000 records → ~5000 unique states (no scaling concern)
+- Paper-final 11000 records → ~11000 unique states (no scaling concern)
+
+**No bank expansion is needed at any stage.** Train/val/test split is by trajectory `seed` range (70/15/15) and there is no shared-puzzle leakage because each seed gets its own procedurally generated puzzle.
+
+This contrasts with Hidato (bounded 5×4 puzzle bank, requires algorithmic bank expansion for pilot+) and Pentomino (mathematically capped at 172 valid 6-piece subsets at 5×6, requires per-trajectory expansion to scale records).
+
 ---
 
 ## 1. Goal & Context
