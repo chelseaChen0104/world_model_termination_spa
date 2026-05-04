@@ -36,6 +36,16 @@ echo "  policy: $POLICY (id=$POLICY_ID)"
 echo "  outputs: $OUT_TRAIN, $OUT_VAL, $OUT_TEST"
 echo ""
 
+# n_root_puzzles tuning: Hidato averages ~3 records/puzzle (hits the
+# sibling_sets_per_root=3 cap thanks to longer trajectories). For a
+# 70/15/15 split, val/test slice (15%) is the binding constraint:
+# need target/(3*0.15) ≈ 2222 root puzzles to hit 1000 val records.
+# Round up to 2500. v3 bank has 600 puzzles; root_idx > 600 cycles
+# but rng-per-root produces different sibling-set seeds → distinct records.
+# v1 of this launcher missed --n-root-puzzles entirely; default 500
+# capped output at ~1050/225/225 vs target 3000/1000/1000.
+N_ROOT=2500
+
 # train_balanced — 3000 sibling sets, all 5 sources (lt:ht:rand:sol:prt)
 echo "--- generating train_balanced (3000) ---"
 $PY scripts/generate_save_data.py \
@@ -44,6 +54,7 @@ $PY scripts/generate_save_data.py \
     --policy-model "$POLICY" \
     --policy-checkpoint-id "$POLICY_ID" \
     --n-target 3000 \
+    --n-root-puzzles "$N_ROOT" \
     --output "$OUT_TRAIN" \
     --seed 100
 
@@ -55,6 +66,7 @@ $PY scripts/generate_save_data.py \
     --policy-model "$POLICY" \
     --policy-checkpoint-id "$POLICY_ID" \
     --n-target 1000 \
+    --n-root-puzzles "$N_ROOT" \
     --output "$OUT_VAL" \
     --seed 200
 
@@ -66,6 +78,7 @@ $PY scripts/generate_save_data.py \
     --policy-model "$POLICY" \
     --policy-checkpoint-id "$POLICY_ID" \
     --n-target 1000 \
+    --n-root-puzzles "$N_ROOT" \
     --output "$OUT_TEST" \
     --seed 300
 

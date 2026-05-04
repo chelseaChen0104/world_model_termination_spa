@@ -39,7 +39,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
@@ -250,11 +250,133 @@ def find_all_tilings(subset: Tuple[str, ...], board_h: int, board_w: int,
     return tilings
 
 
+def _enumerate_local_placements(board: List[List[str]], remaining: List[str],
+                                  board_h: int, board_w: int) -> List[Tuple[str, int, int, int]]:
+    """All locally-valid (piece, ori, anchor_r, anchor_c) placements at this state."""
+    out = []
+    for piece in remaining:
+        for ori_id in range(len(PIECE_ORIENTATIONS[piece])):
+            for ar in range(board_h):
+                for ac in range(board_w):
+                    cells = placement_cells(piece, ori_id, ar, ac)
+                    if cells is None:
+                        continue
+                    if all(0 <= cr < board_h and 0 <= cc < board_w
+                            and board[cr][cc] == "."
+                            for cr, cc in cells):
+                        out.append((piece, ori_id, ar, ac))
+    return out
+
+
+def _dagger_offpath_samples(board: List[List[str]], remaining: List[str],
+                              canonical: Tuple[str, int, int, int],
+                              board_h: int, board_w: int,
+                              puzzle_id: str, step_idx: int,
+                              subset: Tuple[str, ...],
+                              n_deviations: int,
+                              rng: random.Random,
+                              solver: PentominoSolver) -> List[dict]:
+    """Generate up to `n_deviations` off-canonical-path SFT samples at this state.
+
+    For each: pick a different locally-valid placement, apply it to get an
+    off-canonical state s', verify s' is still tileable (solver), get solver's
+    next action from s' as the oracle recovery target, and emit one sample.
+    """
+    legal = _enumerate_local_placements(board, remaining, board_h, board_w)
+    legal = [p for p in legal if p != canonical]
+    if not legal:
+        return []
+    rng.shuffle(legal)
+    out = []
+    tries = 0
+    for alt in legal:
+        if len(out) >= n_deviations:
+            break
+        tries += 1
+        if tries > 10 * n_deviations:
+            break  # avoid pathological loops on rare boards
+        # Apply alt to get off-canonical state s'
+        alt_piece, alt_ori, alt_ar, alt_ac = alt
+        cells = placement_cells(alt_piece, alt_ori, alt_ar, alt_ac)
+        off_board = [row[:] for row in board]
+        for cr, cc in cells:
+            off_board[cr][cc] = alt_piece
+        off_remaining = [p for p in remaining if p != alt_piece]
+
+        # Recovery via solver
+        recovery_path = solver.find_one_solution(off_board, off_remaining)
+        if not recovery_path:
+            continue  # off-path state is doomed; no recovery
+        rec_piece, rec_ori, rec_ar, rec_ac = recovery_path[0]
+        rec_action = ActionStruct(piece=rec_piece, ori=rec_ori,
+                                    row=rec_ar + 1, col=rec_ac + 1)
+        prompt = (
+            f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>user\n{render_user_message(off_board, off_remaining)}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        response = render_response(rec_action)
+        out.append({
+            "prompt": prompt,
+            "response": response,
+            "metadata": {
+                "schema": SCHEMA_VERSION,
+                "puzzle_id": f"{puzzle_id}_dagger_s{step_idx}_d{len(out)}",
+                "step": step_idx,
+                "subset": list(subset),
+                "remaining_pieces_at_step": list(off_remaining),
+                "board_at_step": [row[:] for row in off_board],
+                "action_struct": rec_action.to_dict(),
+                "action_hash": action_hash(rec_action),
+                "is_solver_action": True,
+                "is_dagger_offpath": True,
+                "off_path_deviation": {
+                    "from_step": step_idx,
+                    "canonical_action": {"piece": canonical[0], "ori": canonical[1],
+                                            "row": canonical[2] + 1, "col": canonical[3] + 1},
+                    "deviation_action": {"piece": alt_piece, "ori": alt_ori,
+                                            "row": alt_ar + 1, "col": alt_ac + 1},
+                },
+                "board_h": board_h,
+                "board_w": board_w,
+            },
+        })
+    return out
+
+
+_SHARED_SOLVER_CACHE: Dict[Tuple[int, int], "PentominoSolver"] = {}
+
+
+def _shared_solver(board_h: int, board_w: int) -> "PentominoSolver":
+    key = (board_h, board_w)
+    if key not in _SHARED_SOLVER_CACHE:
+        _SHARED_SOLVER_CACHE[key] = PentominoSolver(
+            board_h=board_h, board_w=board_w, solution_cap=1, node_cap=200_000)
+    return _SHARED_SOLVER_CACHE[key]
+
+
 def trajectory_to_samples(tiling: List[Tuple[str, int, int, int]],
                             subset: Tuple[str, ...],
                             board_h: int, board_w: int,
-                            puzzle_id: str) -> List[dict]:
-    """Walk the tiling step-by-step; emit one (prompt, response) sample per step."""
+                            puzzle_id: str,
+                            dagger_deviations: int = 0,
+                            rng: Optional[random.Random] = None,
+                            solver: Optional[PentominoSolver] = None) -> List[dict]:
+    """Walk the tiling step-by-step; emit one (prompt, response) sample per step.
+
+    If `dagger_deviations > 0`, additionally emit off-canonical-path samples
+    at each step: deviate to a different locally-valid placement, query solver
+    for the recovery action from the resulting off-canonical state, and add
+    that (off_state, recovery_action) as a training sample. This widens
+    state coverage to include "mistake recovery" examples while keeping the
+    plain-action s→a SFT format unchanged.
+    """
+    if dagger_deviations > 0:
+        if rng is None:
+            rng = random.Random(0)
+        if solver is None:
+            solver = PentominoSolver(board_h=board_h, board_w=board_w,
+                                       solution_cap=1, node_cap=200_000)
     board = [["."] * board_w for _ in range(board_h)]
     remaining = list(subset)
     samples = []
@@ -286,6 +408,17 @@ def trajectory_to_samples(tiling: List[Tuple[str, int, int, int]],
             },
         }
         samples.append(sample)
+
+        # DAgger-lite: emit off-canonical-path samples at this state, BEFORE
+        # advancing along the canonical path.
+        if dagger_deviations > 0:
+            samples.extend(_dagger_offpath_samples(
+                board=board, remaining=remaining,
+                canonical=(piece, ori_id, ar, ac),
+                board_h=board_h, board_w=board_w,
+                puzzle_id=puzzle_id, step_idx=step_idx, subset=subset,
+                n_deviations=dagger_deviations, rng=rng, solver=solver,
+            ))
 
         # Apply action to advance state
         cells = placement_cells(piece, ori_id, ar, ac)
@@ -332,6 +465,13 @@ def main():
                    help="Apply 4-fold dihedral augmentation (identity + 180° + "
                         "v-flip + h-flip) to each tiling, deduping symmetric "
                         "self-images. Up to 4× sample count.")
+    p.add_argument("--dagger-deviations", type=int, default=0,
+                   help="DAgger-lite off-path SFT samples per step. At each "
+                        "tiling step, deviate to N different locally-valid "
+                        "placements, ask solver for recovery action, emit "
+                        "(off_state, recovery_action) as additional samples. "
+                        "Plain s,a format preserved (no XML, no tags). "
+                        "Recommended: 2 for first attempt (=> ~2× sample count).")
     args = p.parse_args()
 
     rng = random.Random(args.seed)
@@ -366,8 +506,12 @@ def main():
                 f"pent_{args.board_h}x{args.board_w}_"
                 f"{''.join(subset)}_t{tiling_idx:03d}_{sym}"
             )
-            samples = trajectory_to_samples(tiling, subset, args.board_h, args.board_w,
-                                             puzzle_id)
+            samples = trajectory_to_samples(
+                tiling, subset, args.board_h, args.board_w, puzzle_id,
+                dagger_deviations=args.dagger_deviations,
+                rng=rng, solver=None if args.dagger_deviations == 0 else
+                    _shared_solver(args.board_h, args.board_w),
+            )
             all_samples.extend(samples)
         n_subsets_processed += 1
         n_tilings_total += len(tilings)
