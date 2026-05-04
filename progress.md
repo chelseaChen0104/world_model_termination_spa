@@ -267,7 +267,7 @@
   - **batch_size=16 (vs our 32 — half)**
 - Total effective gradient signal: SPA ~80× more than our B-3
 - Concluded: our SFT may simply be under-trained, not architecturally broken
-- Queued **Run B-4** (`scripts/run_b4_spa_hparams.sh`) with SPA's hyperparameters on B-3's data, to launch when GPU frees up
+- Queued **Run B-4** (`scripts/run_sudoku_9x9_sft_b4.sh`) with SPA's hyperparameters on B-3's data, to launch when GPU frees up
 
 ### Step 31: GitHub state restored
 - Discovered `.gitignore` had unanchored `data/` pattern — was excluding `src/data/` source code

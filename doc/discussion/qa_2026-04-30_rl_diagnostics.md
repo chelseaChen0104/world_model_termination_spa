@@ -1,6 +1,6 @@
 # Q&A — Reading the RL Training Logs (2026-04-30)
 
-Captures what the per-step training metrics in `logs/rl_b{5,7}_phase1*.log` actually mean, so future sessions don't have to re-derive it. Companion to [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md), [plan_2026-04-29_rl_approach.md](plan_2026-04-29_rl_approach.md), and the trainer at [src/training/rl_trainer_v6.py](../src/training/rl_trainer_v6.py).
+Captures what the per-step training metrics in `logs/rl_b{5,7}_phase1*.log` actually mean, so future sessions don't have to re-derive it. Companion to [eval_2026-04-30_b7_rl_phase1.md](../eval_2026-04-30_b7_rl_phase1.md), [plan_2026-04-29_rl_approach.md](../plan_2026-04-29_rl_approach.md), and the trainer at [src/training/rl_trainer_v6.py](../../src/training/rl_trainer_v6.py).
 
 A typical training log line:
 
@@ -14,7 +14,7 @@ step   25 | reward +0.81±0.28 | solved 0% | pg_loss +0.104 | kl 0.0365 | clipfr
 
 ## Q: What is KL?
 
-The "how far has the policy drifted from the frozen SFT reference" number. Computed per-token as `(new_logp − ref_logp)²` averaged over all response tokens (a proxy for KL divergence; see `ppo_update` in [rl_trainer_v6.py](../src/training/rl_trainer_v6.py)).
+The "how far has the policy drifted from the frozen SFT reference" number. Computed per-token as `(new_logp − ref_logp)²` averaged over all response tokens (a proxy for KL divergence; see `ppo_update` in [rl_trainer_v6.py](../../src/training/rl_trainer_v6.py)).
 
 | value | reading |
 |---|---|
@@ -106,7 +106,7 @@ Without it, a single token's update could swing its probability by 5× or 10× i
 
 In our original v6 trainer, `old_logp` was being recomputed at PPO-update time using the *current* policy. So by definition `old_logp == new_logp`, which means `r ≡ 1.0` for every token, which means `clipfrac == 0` always. The clip was never activated, but not because the policy was learning slowly — because the ratio was *never not 1*.
 
-**The fix** (in [rl_trainer_v6.py](../src/training/rl_trainer_v6.py): `StepRecord.old_logps`): cache per-token logprobs *at rollout time* and reuse them for the entire PPO update phase. Then `new_logp` (recomputed each PPO epoch) genuinely differs from `old_logp` (frozen at sampling time), `r` actually moves, and clipping becomes meaningful.
+**The fix** (in [rl_trainer_v6.py](../../src/training/rl_trainer_v6.py): `StepRecord.old_logps`): cache per-token logprobs *at rollout time* and reuse them for the entire PPO update phase. Then `new_logp` (recomputed each PPO epoch) genuinely differs from `old_logp` (frozen at sampling time), `r` actually moves, and clipping becomes meaningful.
 
 After the fix, v7 step 25 clipfrac = 0.02 — non-trivial movement, well within the trust region.
 
@@ -133,7 +133,7 @@ clipfrac > 0         → ratio is moving (no PPO bug)
 | clipfrac → 0 (and stays there) | either the v6 PPO bug (old==new logps) or the policy isn't moving at all (LR too low / data too easy) |
 | KL low + pg_loss nonzero + Pass@1 stuck at 0% | reward is stable but the env is genuinely too hard — no rollout reaches success, so success_bonus never fires. Different problem; address via env design, not RL config |
 
-The B-7 v6 collapse was a specific combo: KL drift (1.7), pg_loss freeze (0.000), clipfrac freeze (0.01) — gradient died after the policy walked off the SFT manifold. The v7 reward redesign targets the *cause* (per-step reward landscape, see [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md) Option D); these three diagnostics will tell us whether the fix worked.
+The B-7 v6 collapse was a specific combo: KL drift (1.7), pg_loss freeze (0.000), clipfrac freeze (0.01) — gradient died after the policy walked off the SFT manifold. The v7 reward redesign targets the *cause* (per-step reward landscape, see [eval_2026-04-30_b7_rl_phase1.md](../eval_2026-04-30_b7_rl_phase1.md) Option D); these three diagnostics will tell us whether the fix worked.
 
 ---
 

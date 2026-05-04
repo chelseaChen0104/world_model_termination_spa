@@ -44,7 +44,7 @@ class LLMTrajectoryConfig:
     # higher-quality LLM-policy data. The full <observation>/<prediction>/<solvable>/...
     # XML format is still used in the SFT TARGET (rebuilt from env ground truth in
     # SFTFormatter.format_step), so the trained model still learns the full format.
-    # See doc/SPEC.md §7.5.
+    # See doc/spec_project.md §7.5.
     # When True, llm_raw_response is NOT stored on TrajectoryStep (it would just be
     # <answer>...</answer>, useless as multi-turn prior context); SFTFormatter falls back
     # to template-generated ground-truth XML for prior turns, keeping prior/target shape

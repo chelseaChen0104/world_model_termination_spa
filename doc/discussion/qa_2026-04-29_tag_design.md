@@ -1,6 +1,6 @@
 # Q&A — SFT Response Tag Design (2026-04-29)
 
-Captures the reasoning behind dropping three response tags from the SFT format. Companion to [SPEC.md](SPEC.md) §7 ("Locked decisions: minimal response tag set") and [HANDOFF.md](HANDOFF.md) §4.
+Captures the reasoning behind dropping three response tags from the SFT format. Companion to [spec_project.md](../spec_project.md) §7 ("Locked decisions: minimal response tag set") and [HANDOFF.md](../HANDOFF.md) §4.
 
 **Final tag set (v4 / sudoku_minimal):** `<observation>` + `<prediction>` + `<solvable>` + `<answer>`.
 **Dropped tags:** `<breaking_point>`, `<terminate_prob>`, `<steps_left>`.
@@ -41,7 +41,7 @@ This was supposed to be a continuous probability that the trajectory will termin
 
 The cleaner version of the same idea: read **P(true) at the `<solvable>` token directly from logits**. That's a calibrated binary decision (single token), works without changing the SFT objective, and is what our threshold-sweep eval already uses to compute ROC AUC. Free probability without paying the calibration tax.
 
-This is what the [solvable-logprob eval mode](../evaluate_rl.py) does, and it's what produced B-5's AUC = 0.726 result.
+This is what the [solvable-logprob eval mode](../../evaluate_rl.py) does, and it's what produced B-5's AUC = 0.726 result.
 
 ---
 

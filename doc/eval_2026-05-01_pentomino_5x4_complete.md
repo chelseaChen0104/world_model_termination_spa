@@ -177,9 +177,9 @@ this env.
 - B-8 RL final sanity stats: [sanity_2026-05-01_b8_rl_v8_rollout_stats.json](sanity_2026-05-01_b8_rl_v8_rollout_stats.json)
 - Greedy gap mechanism: [eval_2026-05-01_pentomino_greedy_gap.md](eval_2026-05-01_pentomino_greedy_gap.md)
 - Augmenter: [src/data/solution_path_augmenter.py](../src/data/solution_path_augmenter.py)
-- Combiner: [scripts/combine_b7_with_augmented.py](../scripts/combine_b7_with_augmented.py)
-- B-8 SFT launcher: [scripts/run_b8_pentomino_augmented_sft.sh](../scripts/run_b8_pentomino_augmented_sft.sh)
-- B-8 RL v8 launcher: [scripts/run_rl_b8_v8.sh](../scripts/run_rl_b8_v8.sh)
+- Combiner: [scripts/combine_pentomino_5x4_with_augmented.py](../scripts/combine_pentomino_5x4_with_augmented.py)
+- B-8 SFT launcher: [scripts/run_pentomino_5x4_sft_augmented.sh](../scripts/run_pentomino_5x4_sft_augmented.sh)
+- B-8 RL v8 launcher: [scripts/run_pentomino_5x4_rl_v8.sh](../scripts/run_pentomino_5x4_rl_v8.sh)
 
 ## Conclusions
 

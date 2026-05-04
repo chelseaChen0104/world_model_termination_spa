@@ -101,7 +101,7 @@ This is fine for "agent reasoning about its own next action," but it's **not the
 
 The current multi-turn world-model SFT, as built, does **not** demonstrate that an SPA-style world model lifts termination prediction. The model learned a shortcut (echo) instead of grounding in the env's dynamics. This isn't a training failure (loss curves were healthy) — it's a **data-format failure** baked into the multi-turn structure.
 
-Going through SPEC.md §3's success-criteria checklist on this checkpoint:
+Going through spec_project.md §3's success-criteria checklist on this checkpoint:
 
 | Success criterion | Status |
 |---|---|
@@ -165,7 +165,7 @@ Before retraining, we should pin down what `<solvable>` actually means in the re
 - `<solvable>` = is_solvable(s_t) — current state, decoupled from action
 - `<breaking_point>` = was the previous action a BP (i.e., prev step's action put us here)
 - Useful for "external monitor of any agent's state"
-- Aligns more cleanly with SPEC.md §1's predictive-gap criterion (the gap exists *between* the BP and formal failure, regardless of next action)
+- Aligns more cleanly with spec_project.md §1's predictive-gap criterion (the gap exists *between* the BP and formal failure, regardless of next action)
 
 Recommendation: **Option 2**, because our research question is specifically state classification. The agent's next action shouldn't change whether the current state is doomed. We still keep `<answer>` so the model can act, but the termination tags are properties of the state.
 
@@ -201,7 +201,7 @@ This requires a one-line label change in the formatter: instead of `step.is_solv
 
 ---
 
-## 5. Implications for SPEC.md and pipeline_design.md
+## 5. Implications for spec_project.md and pipeline_design.md
 
 To be reflected in the next spec rev:
 
@@ -217,5 +217,5 @@ To be reflected in the next spec rev:
 - [eval_2026-04-28_data_strategy.md](eval_2026-04-28_data_strategy.md) — pre-training data inspection (predicted the BP-step skew that contributed to this failure)
 - [eval_2026-04-28_sft_track_b_tier_a.md](eval_2026-04-28_sft_track_b_tier_a.md) — single-turn-eval write-up
 - [pipeline_design.md](pipeline_design.md) — current pipeline (needs update per §5)
-- [SPEC.md](SPEC.md) — research framing (needs update per §5)
+- [spec_project.md](spec_project.md) — research framing (needs update per §5)
 - SPA paper §2.2 — the actual training recipe we should be matching

@@ -238,7 +238,7 @@ Current v2 gives +0.1 per tag for 5 tags = +0.5 max. After dropping 3 tags (now 
 | `src/training/rl_trainer_v6.py` (above) | `truncation_mode ∈ {'off', 'conservative'}` + `truncation_threshold` parameter, gating logic in the rollout loop. Phase 1 uses `'off'`. Phase 2 flips to `'conservative'`. | (folded into above) |
 | `src/training/config/rl_sudoku_4x4_b5.yaml` | New config: B-5 reference checkpoint, vLLM rollout settings, group_size=8, T=0.7, β=0.05, n_puzzles_per_batch=8 (8 puzzles × 8 rollouts = 64 trajectories per RL step). | ~80 lines |
 | `evaluate_rl.py` | Add `--track-precision-recall` mode that emits Prec(F)/Rec(F) sweep at τ ∈ {0.1, 0.3, 0.5, 0.7, 0.9} as JSON. Used by Phase 1 monitoring loop. Existing Pass@1 mode reused as-is. | ~50 lines |
-| `scripts/run_rl_b5_phase1.sh` | New launcher for Phase 1 RL on autodl2. | ~30 lines |
+| `scripts/run_sudoku_4x4_rl_v6_phase1.sh` | New launcher for Phase 1 RL on autodl2. | ~30 lines |
 
 ### Infra checks (one-shot)
 

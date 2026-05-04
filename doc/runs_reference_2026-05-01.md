@@ -135,7 +135,7 @@ point, see [HANDOFF.md](HANDOFF.md).
   - Calibration trade: 98% → 91% viability accuracy (small)
 - **Notes**:
   - Augmenter at [src/data/solution_path_augmenter.py](../src/data/solution_path_augmenter.py).
-  - Combiner at [scripts/combine_b7_with_augmented.py](../scripts/combine_b7_with_augmented.py).
+  - Combiner at [scripts/combine_pentomino_5x4_with_augmented.py](../scripts/combine_pentomino_5x4_with_augmented.py).
   - Sanity stats at [doc/sanity_2026-05-01_b8_rollout_stats.json](sanity_2026-05-01_b8_rollout_stats.json).
   - **Headline finding**: B-7's Pass@1=0% was a *data composition* problem, not a
     recipe problem. The augmenter targeting late-stage states cured it by enabling
@@ -210,7 +210,7 @@ point, see [HANDOFF.md](HANDOFF.md).
     complete a Hidato puzzle even with 3000 attempts), but unlike B-7, the
     intermediate states are well-distributed (75% solvable, step distribution
     0-11). Augmentation adds the missing positive completion examples.
-  - Spec: [spec_2026-05-01_hidato.md](spec_2026-05-01_hidato.md).
+  - Spec: [spec_hidato.md](spec_hidato.md).
 - **Pending follow-ups after SFT lands**:
   1. Logprob threshold sweep + sanity rollout test
   2. RL with v8 anchor (or v8.2 if v8 collapses on Hidato)
@@ -420,7 +420,7 @@ point, see [HANDOFF.md](HANDOFF.md).
   should be huge given 53-84% per-batch solve rate. Greedy Pass@1 needs the
   v8.2 dual-token anchor to be stable.
 - **Notes**: Drove the v8.2 implementation. Launcher:
-  [scripts/run_rl_b8_v8.sh](../scripts/run_rl_b8_v8.sh).
+  [scripts/run_pentomino_5x4_rl_v8.sh](../scripts/run_pentomino_5x4_rl_v8.sh).
 
 ---
 
@@ -445,7 +445,7 @@ point, see [HANDOFF.md](HANDOFF.md).
   on the 1-3 viability positions per response).
 - **Success criteria**: greedy Pass@1 ≥ B-8 SFT's 0% (i.e., positive), greedy
   solvable_acc preserved. Per-batch stochastic solve rate stays high (50%+).
-- **Launcher**: [scripts/run_rl_b8_v8_2.sh](../scripts/run_rl_b8_v8_2.sh).
+- **Launcher**: [scripts/run_pentomino_5x4_rl_v8_2_dual_anchor.sh](../scripts/run_pentomino_5x4_rl_v8_2_dual_anchor.sh).
 
 ### Phase 2 truncation re-eval (clean Pass@1 measurement) 📋
 

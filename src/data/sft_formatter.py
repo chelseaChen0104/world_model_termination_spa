@@ -140,7 +140,7 @@ In your reasoning:
 Then provide your action in <answer> using format: place N at row R col C""",
 
         # Minimal variant for the post-pivot single-step training (action-conditional <solvable>).
-        # Drops <terminate_prob>, <steps_left>, <breaking_point> — see doc/SPEC.md §7.5 v4.
+        # Drops <terminate_prob>, <steps_left>, <breaking_point> — see doc/spec_project.md §7.5 v4.
         'sudoku_minimal': """You are solving a Sudoku puzzle. Fill in empty cells (shown as .) with numbers 1-9 so that each row, column, and 3x3 box contains each number exactly once.
 
 Grid format: Numbers separated by spaces, | separates 3x3 boxes, - separates rows of boxes.
@@ -152,7 +152,7 @@ In your reasoning:
 
 Then provide your action in <answer> using format: place N at row R col C""",
 
-        # Pentomino tiling — uses the new tag set (per doc/spec_2026-04-29_pentomino.md §4):
+        # Pentomino tiling — uses the new tag set (per doc/spec_pentomino.md §4):
         # <observation> + <next_state> + <viability> + <answer>. <prediction> renamed to <next_state>;
         # <solvable> renamed to <viability>. Sudoku variants keep their original tag names for
         # backwards compatibility with B-0..B-5.
@@ -227,7 +227,7 @@ where {N} is the next sequential number to place and (R, C) are 1-indexed cell c
         # The state-prediction tag name differs by env family:
         #   - Sudoku / Sokoban variants:   <prediction>...</prediction>
         #   - Polyomino (and future MKD):  <next_state>...</next_state>
-        # See doc/spec_2026-04-29_pentomino.md §4 for the rename rationale.
+        # See doc/spec_pentomino.md §4 for the rename rationale.
         next_tag = 'next_state' if is_polyomino else 'prediction'
         xml_parts = [
             "<think>",

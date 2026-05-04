@@ -2,10 +2,10 @@
 
 A complete walkthrough of how one RL training step works in this project, mapped to the concepts in PPO/GRPO and the actual lines of code that implement them. Companion docs:
 - [qa_2026-04-30_rl_diagnostics.md](qa_2026-04-30_rl_diagnostics.md) — what the per-step log fields mean (KL, pg_loss, clipfrac).
-- [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md) — the v6 collapse + v7 reward redesign.
-- [plan_2026-04-29_rl_approach.md](plan_2026-04-29_rl_approach.md) — Phase 1 / Phase 2 plan.
+- [eval_2026-04-30_b7_rl_phase1.md](../eval_2026-04-30_b7_rl_phase1.md) — the v6 collapse + v7 reward redesign.
+- [plan_2026-04-29_rl_approach.md](../plan_2026-04-29_rl_approach.md) — Phase 1 / Phase 2 plan.
 
-The trainer is one ~800-line file: [src/training/rl_trainer_v6.py](../src/training/rl_trainer_v6.py). Read this doc with that file open.
+The trainer is one ~800-line file: [src/training/rl_trainer_v6.py](../../src/training/rl_trainer_v6.py). Read this doc with that file open.
 
 ---
 
@@ -72,7 +72,7 @@ The trainer is one ~800-line file: [src/training/rl_trainer_v6.py](../src/traini
   └──────────────────────┘
 ```
 
-That's one training step. We repeat it 200 times. The whole loop is `for step in range(1, cfg.n_total_steps + 1):` at [rl_trainer_v6.py:761](../src/training/rl_trainer_v6.py#L761).
+That's one training step. We repeat it 200 times. The whole loop is `for step in range(1, cfg.n_total_steps + 1):` at [rl_trainer_v6.py:761](../../src/training/rl_trainer_v6.py#L761).
 
 ---
 
@@ -104,7 +104,7 @@ We also load the **tokenizer** of the base model (`Qwen/Qwen2.5-1.5B-Instruct`) 
 
 ## 2. The environment — what defines a state, action, reward source?
 
-The env is the source of ground-truth `is_solvable` labels. For Polyomino it's defined in [src/environments/polyomino.py](../src/environments/polyomino.py).
+The env is the source of ground-truth `is_solvable` labels. For Polyomino it's defined in [src/environments/polyomino.py](../../src/environments/polyomino.py).
 
 A **state** is a partial board: which cells are already covered, which pentominoes are still unplaced, and whether the env has terminated. The model never sees this struct directly — it sees a *rendered text* version through `env.reset()` / `env.step()`'s `obs`:
 
@@ -197,7 +197,7 @@ Per-step we sample `n_puzzles_per_batch=4` puzzle seeds and run `group_size=8` p
 - The `8 per puzzle` is needed for **GRPO's group baseline** (see §7) — to compute the per-puzzle mean reward we average across all 8 rollouts of the same starting board.
 - The `4 different puzzles` reduces gradient variance — without it, every gradient step would be specialized to one specific board.
 
-All 32 rollouts are stepped **in parallel**: at each turn t, we collect the prompts of all alive rollouts, batch them through one `model.generate()` call, and route the responses back to the appropriate rollout. This is the speedup that made RL practical — see `do_rollouts_batched` at [rl_trainer_v6.py:373](../src/training/rl_trainer_v6.py#L373).
+All 32 rollouts are stepped **in parallel**: at each turn t, we collect the prompts of all alive rollouts, batch them through one `model.generate()` call, and route the responses back to the appropriate rollout. This is the speedup that made RL practical — see `do_rollouts_batched` at [rl_trainer_v6.py:373](../../src/training/rl_trainer_v6.py#L373).
 
 ### 4.2 Sampling the response
 
@@ -264,7 +264,7 @@ step_reward = calib_r + fmt_r + progress_r
 | TN (pred=True, GT=True) | +0.3 | +1.0 |
 | unparseable | worst-case for class | worst-case for class |
 
-(See `solvable_reward` at [rl_trainer_v6.py:144](../src/training/rl_trainer_v6.py#L144). Magnitudes from `RLConfig` defaults at [rl_trainer_v6.py:79](../src/training/rl_trainer_v6.py#L79).)
+(See `solvable_reward` at [rl_trainer_v6.py:144](../../src/training/rl_trainer_v6.py#L144). Magnitudes from `RLConfig` defaults at [rl_trainer_v6.py:79](../../src/training/rl_trainer_v6.py#L79).)
 
 **`fmt_reward`** = +0.05 per of 4 required tags present in the response (max +0.20). Discourages format-breaking outputs.
 
@@ -284,7 +284,7 @@ with `success_bonus = +3.0` (v6 was originally +10, reduced to +3 in v6.1) and `
 
 ### 5.3 v7 post-batch class rebalancing
 
-After all 32 rollouts are collected, [rebalance_rewards()](../src/training/rl_trainer_v6.py#L483) walks every step, counts `(n_solv, n_doom)`, and scales each step's `calib_reward` by an inverse-frequency weight:
+After all 32 rollouts are collected, [rebalance_rewards()](../../src/training/rl_trainer_v6.py#L483) walks every step, counts `(n_solv, n_doom)`, and scales each step's `calib_reward` by an inverse-frequency weight:
 
 ```python
 # rl_trainer_v6.py:511-513
@@ -370,7 +370,7 @@ total_t   = loss_t + kl_coef · kl_t
 
 Then we sum/mean `total_t` over all response tokens and call `backward()`.
 
-In code, this is `ppo_update()` at [rl_trainer_v6.py:545](../src/training/rl_trainer_v6.py#L545):
+In code, this is `ppo_update()` at [rl_trainer_v6.py:545](../../src/training/rl_trainer_v6.py#L545):
 
 ```python
 # rl_trainer_v6.py:570-588
@@ -529,7 +529,7 @@ Emit stdout + JSONL row. If `step % eval_every == 0`, run greedy `quick_pass1` f
 
 ## 11. Connection to recent observations
 
-This is where the abstract knobs become specific findings. From the v7 Pentomino run + sanity test ([sanity_2026-04-30_b7_rollout_stats.json](sanity_2026-04-30_b7_rollout_stats.json), [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md)):
+This is where the abstract knobs become specific findings. From the v7 Pentomino run + sanity test ([sanity_2026-04-30_b7_rollout_stats.json](../sanity_2026-04-30_b7_rollout_stats.json), [eval_2026-04-30_b7_rl_phase1.md](../eval_2026-04-30_b7_rl_phase1.md)):
 
 | RL concept (this doc) | What we measured | Implication |
 |---|---|---|
@@ -550,12 +550,12 @@ If you want to modify behavior:
 
 | To change… | Edit… |
 |---|---|
-| Reward magnitudes (TP/FN/FP/TN, success bonus, format bonus) | `RLConfig` defaults [:79-95](../src/training/rl_trainer_v6.py#L79) or `--*-reward` CLI flags |
-| Per-step weighting / rebalancing strategy | `rebalance_rewards()` [:483](../src/training/rl_trainer_v6.py#L483) |
+| Reward magnitudes (TP/FN/FP/TN, success bonus, format bonus) | `RLConfig` defaults [:79-95](../../src/training/rl_trainer_v6.py#L79) or `--*-reward` CLI flags |
+| Per-step weighting / rebalancing strategy | `rebalance_rewards()` [:483](../../src/training/rl_trainer_v6.py#L483) |
 | Group / batch sizing | `--n-puzzles-per-batch`, `--group-size` CLI flags |
 | Sampling temperature / max tokens | `RLConfig.temperature`, `RLConfig.max_response_tokens` |
 | KL coefficient | `--kl-coef` CLI flag |
-| Add a Phase 2 truncation gate (don't run dead rollouts) | The hook is at [:285-294](../src/training/rl_trainer_v6.py#L285) (`truncation_mode == 'conservative'`); not yet wired up |
+| Add a Phase 2 truncation gate (don't run dead rollouts) | The hook is at [:285-294](../../src/training/rl_trainer_v6.py#L285) (`truncation_mode == 'conservative'`); not yet wired up |
 | Add an auxiliary head / per-tag KL | New code path in `ppo_update()`; would need to identify `<viability>` token positions in the response and add a separate KL term computed only over those positions |
 
-For the launch wrappers (which clouds, which env, which output dir), see [scripts/run_rl_b5_phase1.sh](../scripts/run_rl_b5_phase1.sh) (Sudoku) and [scripts/run_rl_b7_phase1.sh](../scripts/run_rl_b7_phase1.sh) (Pentomino).
+For the launch wrappers (which clouds, which env, which output dir), see [scripts/run_sudoku_4x4_rl_v6_phase1.sh](../../scripts/run_sudoku_4x4_rl_v6_phase1.sh) (Sudoku) and [scripts/run_pentomino_5x4_rl_v6_phase1.sh](../../scripts/run_pentomino_5x4_rl_v6_phase1.sh) (Pentomino).

@@ -1,4 +1,4 @@
-# Spec — Hidato Env (2026-05-01)
+# Spec — Hidato Env
 
 A path-fill puzzle env added as a third game (after Sudoku and Pentomino) to
 test whether the recipe transfers to a *greedy-friendly* env where forced
@@ -7,6 +7,9 @@ moves dominate. Replaces the previously-considered Kakuro after a switch on
 
 See [plan_2026-05-01_next_env_choice.md](plan_2026-05-01_next_env_choice.md)
 for the rationale of choosing a third constraint-propagation env.
+
+> **Spec status (2026-05-03)**: env + SFT + RL all built and running.
+> See "Status & Results" section at the bottom for the current numbers.
 
 ## Game rules
 
@@ -36,7 +39,7 @@ still empty**. In practice:
 → The argmax over valid next-cell choices is much more likely to be correct
 than on Pentomino's spread-thin first-move distribution.
 
-## API (mirrors PolyominoEnv / KakuroEnv)
+## API (mirrors PolyominoEnv)
 
 ```python
 class HidatoEnv(BaseTerminationEnv):
@@ -143,96 +146,75 @@ This is the same flavor of predictive gap as Pentomino (locally valid,
 globally unreachable), but the per-step argmax-correct probability is much
 higher because adjacency forces the option set to be small.
 
-## Puzzle bank: simple curation strategy
+## Puzzle bank
 
-Hand-design ~10-15 puzzles by:
-1. Pick a Hamiltonian path through a small grid by hand (or random search +
-   verification).
-2. Strip 30-50% of the cells to make them empty.
-3. Verify the partial puzzle has a unique solution (or at least one valid
-   completion) using the solvability checker.
+Hand-curated, lives in [src/environments/hidato_puzzle_bank.py](../src/environments/hidato_puzzle_bank.py).
+**8 puzzles** spanning sizes 3×3 to 5×4:
 
-For 4×4 grids (16 cells, K=15 transitions) this is fast.
+| ID | Size | Cells | Givens | Empty (= rollout length) |
+|---|---|---|---|---|
+| 3x3_snake / 3x3_u / 3x3_spiral | 3×3 | 9 | 2 | 7 |
+| 4x3_snake | 4×3 | 12 | 2 | 10 |
+| 5x3_snake | 5×3 | 15 | 3 | 12 |
+| 4x4_boustrophedon / 4x4_spiral | 4×4 | 16 | 2-3 | 13–14 |
+| 5x4_snake | 5×4 | 20 | 3 | 17 |
 
-Initial bank: 5-10 puzzles spanning 3×3, 4×4, 5×5 sizes.
+> **Known limitation (2026-05-03):** 8 puzzles is too small. Eval cycles
+> through them ~3.75× per 30-puzzle eval, and training data hits 98.5%
+> exact-duplicate rate (only ~183 unique (prompt, response) pairs after
+> augmentation × oversample). The 60% Pass@1 we see post-RL is partly
+> memorization-driven; held-out generalization untested. **Expanding the
+> bank to 50-200 puzzles via algorithmic generation is queued in
+> [future_steps.md](future_steps.md) NEAR-6.** Visualization of three
+> representative puzzles in [plots/hidato_examples.png](plots/hidato_examples.png).
 
-## SFT formatter variant
+## Files (built; no longer "to create")
 
-Add `hidato_minimal` to `SFTFormatter`. Mostly a copy of `sudoku_minimal`
-with hidato-specific rendering details (empty cells as `.`, integer cells
-as their digits).
-
-## Predictive gap test
-
-Same as Pentomino: generate ~500 random rollouts, measure the fraction of
-states that look valid (no immediate adjacency violation) but are actually
-doomed.
-
-Target: between 30% (good) and 70% (too sparse). If too low, increase grid
-size or strip more givens.
-
-## Files to create
-
-```
-src/environments/
-  hidato.py                     -- HidatoEnv class (~300 LOC est)
-  hidato_utils.py               -- solvability checker, helpers (~150 LOC)
-  hidato_puzzle_bank.py         -- 10-15 hand-curated puzzles (~150 LOC)
-
-src/data/sft_formatter.py       -- add `hidato_minimal` variant (~30 LOC delta)
-
-scripts/
-  generate_hidato.sh            -- LLM-policy data gen launcher (~50 LOC)
-```
-
-## Effort estimate
-
-| Phase | Effort |
+| File | Role |
 |---|---|
-| 1. Solvability checker (`hidato_utils.py`) | ~2 hr |
-| 2. Puzzle bank with 5-10 hand-curated entries | ~1.5 hr |
-| 3. HidatoEnv class | ~2.5 hr |
-| 4. Tests | ~30 min |
-| 5. SFTFormatter `hidato_minimal` variant | ~45 min |
-| 6. LLM-policy data gen | ~3 hr GPU |
-| 7. SFT training (B-H1 = first Hidato SFT) | ~2 hr GPU |
-| 8. Eval (logprob + sanity rollout) | ~30 min |
-| 9. RL with v8 anchor | ~5 hr GPU |
-| **Total** | **~7 hr local + ~10 hr GPU = ~17 hr** |
+| [src/environments/hidato.py](../src/environments/hidato.py) | `HidatoEnv` class |
+| [src/environments/hidato_utils.py](../src/environments/hidato_utils.py) | Solvability checker (backtracking + connectivity pruning) |
+| [src/environments/hidato_puzzle_bank.py](../src/environments/hidato_puzzle_bank.py) | 8 hand-curated puzzles |
+| [src/data/sft_formatter.py](../src/data/sft_formatter.py) `hidato_minimal` variant | SFT response formatter |
+| [scripts/generate_hidato.sh](../scripts/generate_hidato.sh) | LLM-policy data-gen launcher |
+| [src/data/hidato_solution_path_augmenter.py](../src/data/hidato_solution_path_augmenter.py) | Solution-path augmenter (needed for SFT to escape regime-1) |
+| [scripts/combine_hidato_with_augmented.py](../scripts/combine_hidato_with_augmented.py) | LLM-policy + augmented data combiner |
+| [scripts/run_hidato_sft.sh](../scripts/run_hidato_sft.sh) | SFT launcher |
+| [scripts/run_hidato_rl_v8.sh](../scripts/run_hidato_rl_v8.sh) | RL launcher (v8 anchor) |
+| [scripts/run_hidato_full_pipeline_no_leak.sh](../scripts/run_hidato_full_pipeline_no_leak.sh) | Strip leak + SFT + RL + eval |
 
-## Success criteria
+## Risks (current state)
 
-- **B-H1 SFT**: AUC ≥ 0.95, **greedy Pass@1 ≥ 5%** (non-zero unlike Pentomino).
-- **B-H1 RL with v8 anchor**: Pass@1 climbs above SFT level, calibration
-  preserved (`solvable_acc` ≥ 0.95).
-- **Predictive gap test**: 30%+ of states "look valid but doom" under random
-  play.
+1. **Predictive gap is narrow but not too narrow.** ~67% of random rollouts
+   end in doom; the predictive gap is real but adjacency forcing makes it
+   easier than Pentomino. Confirmed via random-rollout test 2026-05-01.
 
-## Risks
+2. **Trajectory length is the key cost driver.** A 5×4 puzzle with 3 givens
+   = 17 placements. Per-step `p_correct = 0.95` gives `0.95^17 ≈ 0.42` —
+   high enough to score 60% greedy Pass@1 with our current model.
 
-1. **Predictive gap might be too narrow**: Hidato's adjacency forcing is so
-   strong that the model could solve every state by just following the only
-   valid adjacent cell. If that happens, there's no predictive gap to learn.
-   Mitigation: pick puzzles where multiple adjacent cells are valid early
-   in the sequence.
+3. **Bank is too small** (above) → memorization risk → unmitigated unless
+   we expand. See NEAR-6.
 
-2. **Backtracking solver could be slow on bigger grids**: 6×6 = 36 cells
-   might push the depth bound. Mitigation: stick to 4×4 / 5×5 for v1.
+## Status & Results (snapshot 2026-05-03)
 
-3. **Trajectory length is long**: a 5×5 puzzle with 5 givens needs the model
-   to place 20 numbers — a 20-step trajectory. Greedy probability compounds.
-   Even at p_correct = 0.85 per step, 0.85^20 ≈ 4%. Mitigation: keep grids
-   small (4×4 = 16 steps) or include more givens (fewer empty cells = shorter
-   trajectories).
+- [x] Solvability checker (built; backtracking + reachability pruning)
+- [x] Puzzle bank (8 puzzles)
+- [x] HidatoEnv class
+- [x] Tests
+- [x] SFT formatter variant `hidato_minimal`
+- [x] LLM-policy data gen (3000 trajectories, 9627 single-step samples)
+- [x] Solution-path augmenter (80 unique augmented samples × 30 oversample = 2400)
+- [x] B-H1 combined SFT dataset (12,027 train, 80% solvable / 20% doom)
+- [x] **B-H1 SFT**: AUC = 1.000 (perfect logprob discrimination), eval_loss 0.0014
+- [x] **B-H1 SFT Pass@1 with eval-pipeline fix**: 16.7% greedy (after `--prepend-current-state --single-turn-eval --max-response-tokens 512`); 0% without
+- [x] **B-H1 RL with v8 anchor (leaked SFT)**: Pass@1 60% greedy at step 175+ — major lift; calibration preserved (solvable_acc 1.0, bp_recall 1.0)
+- [ ] **Hidato no-leak SFT + RL**: queued to launch on autodl1 after current RL finishes (will use v8 anchor + `--action-quality-bonus 0.5`)
+- [ ] **Held-out evaluation**: pending bank expansion (NEAR-6 in future_steps.md)
 
-## Status (2026-05-01)
+The SFT-stage greedy Pass@1 success criterion (≥ 5%) was achieved at 16.7%.
+The RL-stage criterion (Pass@1 climbs above SFT, calibration preserved) was
+achieved at 60% with `solvable_acc=1.0`. Both well past spec targets.
 
-- [x] Spec written
-- [ ] Solvability checker
-- [ ] Puzzle bank
-- [ ] Env class
-- [ ] Tests
-- [ ] SFT formatter variant
-- [ ] LLM-policy data gen
-- [ ] SFT
-- [ ] RL
+Caveat: the 60% number is on the same 8-puzzle bank as training. We don't
+yet know how the model performs on held-out Hidato puzzles.

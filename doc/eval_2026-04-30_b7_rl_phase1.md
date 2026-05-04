@@ -134,7 +134,7 @@ vs v6 unbalanced gradient share (~94% from doom-state TP/FN, ~6% from solvable-s
 
 If any of these fail by step 100, fall back to Option A (B-9 5×5 board).
 
-Launcher: `bash scripts/run_rl_b7_phase1.sh` now defaults to `REWARD_VERSION=v7` and writes to `outputs/rl_b7_phase1_v7/` (the failed v6 checkpoint at `outputs/rl_b7_phase1/` is preserved as the negative baseline). Override with `REWARD_VERSION=v6` to reproduce the prior failure.
+Launcher: `bash scripts/run_pentomino_5x4_rl_v6_phase1.sh` now defaults to `REWARD_VERSION=v7` and writes to `outputs/rl_b7_phase1_v7/` (the failed v6 checkpoint at `outputs/rl_b7_phase1/` is preserved as the negative baseline). Override with `REWARD_VERSION=v6` to reproduce the prior failure.
 
 ## Compute used
 
@@ -147,7 +147,7 @@ Launcher: `bash scripts/run_rl_b7_phase1.sh` now defaults to `REWARD_VERSION=v7`
 ```bash
 ssh autodl 'cd /root/autodl-tmp/world_model_termination_spa && \
             N_TOTAL_STEPS=200 LR=1e-5 \
-            bash scripts/run_rl_b7_phase1.sh'
+            bash scripts/run_pentomino_5x4_rl_v6_phase1.sh'
 ```
 
 Logs: [logs/rl_b7_phase1.log](../logs/rl_b7_phase1.log).

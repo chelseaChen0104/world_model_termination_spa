@@ -1,0 +1,24 @@
+Hidato — ⚠️ structural concerns
+0 violations (schema is sound)
+50 unique states (great diversity)
+30% mixed rate ← below 50% Hidato target
+16 deceptive pairs (early; will scale to 400+ with 1500 records)
+Class distribution: 56 viable / 15 doomed / 50 local_invalid / 1 parse_invalid
+avg candidates per record: 2.44 (heavy dedup, 66% loss)
+prt: only 3/50 — doomed alternatives are rare in Hidato
+Diagnosis of Hidato concerns
+These are structural Hidato properties, not pipeline bugs:
+
+50 local_invalid candidates: the SFT-only π_θ (16% Pass@1) emits wrong-value actions (value != next_n) ~50% of the time. Schema correctly tags them as local_invalid. Not a quality issue per se — just that the LLM is weak.
+
+Only 3 prt candidates: Hidato's action space is ≤4 cells with value == next_n enforced. Locally-legal-but-doomed alternatives are rare because most adjacent empty cells lead to viable continuations. This is intrinsic to the env.
+
+30% mixed rate (vs 50% target): a state is "mixed" only if it has at least 1 viable AND 1 doomed valid candidate. With only ~0.3 valid_doomed per record on average, mixed sets are limited. This is structural — narrow action space → few doomed alternatives → fewer mixed sibling sets.
+
+What this means
+The dataset is schema-correct and useful, but f_φ's ranking loss L_rank only fires on mixed sets. With 30% mixed in 1500 records → ~450 ranking-loss-active records for training. Smaller than Sudoku's expected ~750 but still trainable.
+
+For paper-final, tighter boundary filtering (skip non-boundary states more aggressively) could push mixed rate to 40-50%. But that requires restarting toy with different params.
+
+My recommendation
+Let both toy runs complete (Sudoku ~10 min more, Hidato ~30 min more). The data is correct and useful. Report Hidato's lower mixed rate as a known structural quirk; address in pilot if needed by tightening boundary criterion.

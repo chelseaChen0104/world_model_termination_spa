@@ -1,7 +1,7 @@
 """Build the B-H1 SFT dataset by concatenating Hidato LLM-policy data with
 solution-path augmented samples.
 
-Mirror of scripts/combine_b7_with_augmented.py, but for Hidato.
+Mirror of scripts/combine_pentomino_5x4_with_augmented.py, but for Hidato.
 
 Why oversample: the augmented data has ~80 unique samples (one per
 empty cell across the 8-puzzle bank). Without oversampling, augmented

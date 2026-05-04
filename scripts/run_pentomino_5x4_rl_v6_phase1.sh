@@ -1,7 +1,7 @@
 #!/bin/bash
 # Phase 1 RL on B-7 Pentomino-easy SFT checkpoint.
 #
-# Distinct from run_rl_b5_phase1.sh (which is the Sudoku 4×4 RL track).
+# Distinct from run_sudoku_4x4_rl_v6_phase1.sh (which is the Sudoku 4×4 RL track).
 # Different env, different SFT checkpoint, different output dirs.
 #
 # B-7 is already RL-ready in the sense of the truncation gate
@@ -12,8 +12,8 @@
 # Wall time on H800: ~4-5 hours
 #
 # Usage:
-#   bash scripts/run_rl_b7_phase1.sh                 # default
-#   N_TOTAL_STEPS=500 LR=1e-5 bash scripts/run_rl_b7_phase1.sh   # longer
+#   bash scripts/run_pentomino_5x4_rl_v6_phase1.sh                 # default
+#   N_TOTAL_STEPS=500 LR=1e-5 bash scripts/run_pentomino_5x4_rl_v6_phase1.sh   # longer
 
 set -e
 cd /root/autodl-tmp/world_model_termination_spa

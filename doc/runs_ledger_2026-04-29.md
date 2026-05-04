@@ -6,7 +6,7 @@ For the deeper write-ups on the headline findings, see the dated artifacts:
 - [report_2026-04-28_sft_b_diagnosis_and_pivot.md](report_2026-04-28_sft_b_diagnosis_and_pivot.md) — B-0 temporal-echo finding
 - [eval_2026-04-28_sft_track_b_tier_a.md](eval_2026-04-28_sft_track_b_tier_a.md) — B-0 single-turn Tier A eval
 - [eval_2026-04-29_b5_4x4_spa_replication.md](eval_2026-04-29_b5_4x4_spa_replication.md) — B-5 (the success)
-- [qa_2026-04-29_tag_design.md](qa_2026-04-29_tag_design.md) — why we dropped `<breaking_point>` / `<terminate_prob>` / `<steps_left>`
+- [qa_2026-04-29_tag_design.md](discussion/qa_2026-04-29_tag_design.md) — why we dropped `<breaking_point>` / `<terminate_prob>` / `<steps_left>`
 
 Common across all runs:
 - Base model: **Qwen/Qwen2.5-1.5B-Instruct**
@@ -142,7 +142,7 @@ Common across all runs:
 | `max_length` | 2,048 |
 | Planned updates | 775 |
 | **Actual updates completed** | **600** (training crashed at step 600 during checkpoint save — disk full on autodl1) |
-| Launch script | [scripts/run_b4_spa_hparams.sh](../scripts/run_b4_spa_hparams.sh) |
+| Launch script | [scripts/run_sudoku_9x9_sft_b4.sh](../scripts/run_sudoku_9x9_sft_b4.sh) |
 | Training log | [logs/sft_b4.log](../logs/sft_b4.log) |
 | Eval logs | [logs/eval_b4.log](../logs/eval_b4.log) (failed — no `/final/`), [logs/eval_b4_ck600.log](../logs/eval_b4_ck600.log) (recovered) |
 | Greedy Acc / Prec / Rec / F1 | 33.3% / 33.3% / 100.0% / 50.0% (collapsed to all-True) |
@@ -165,7 +165,7 @@ Common across all runs:
 | `max_length` | 1,024 |
 | Total updates | 2,050 |
 | `eval_steps` | 10 (205 dense eval points — finest curve we have) |
-| Launch script | [scripts/run_b5_4x4_spa_hparams.sh](../scripts/run_b5_4x4_spa_hparams.sh) |
+| Launch script | [scripts/run_sudoku_4x4_sft.sh](../scripts/run_sudoku_4x4_sft.sh) |
 | Training log | [logs/sft_b5.log](../logs/sft_b5.log) |
 | Eval log | [logs/eval_b5.log](../logs/eval_b5.log) |
 | Greedy Acc / Prec / Rec / F1 | 44.3% / 24.4% / 32.0% / 27.7% (over-predicts True; not collapsed) |
@@ -189,7 +189,7 @@ Common across all runs:
 | `max_length` | 1,024 |
 | Total updates | 925 |
 | `eval_steps` | 25 |
-| Launch script | [scripts/run_b7_pentomino_easy_sft.sh](../scripts/run_b7_pentomino_easy_sft.sh) |
+| Launch script | [scripts/run_pentomino_5x4_sft.sh](../scripts/run_pentomino_5x4_sft.sh) |
 | Training log | [logs/sft_b7.log](../logs/sft_b7.log) |
 | Eval log | [logs/eval_b7.log](../logs/eval_b7.log) |
 | Greedy Acc / Prec / Rec / F1 | 49.5% / 33.3% / 1.0% / 1.9% (collapsed to all-False — same shape as B-5 greedy) |
@@ -197,7 +197,7 @@ Common across all runs:
 | P(true) mean separation | **+0.548** (solvable 0.548 vs unsolvable 0.000) — 24× larger than B-5 |
 | Prec(F) at τ=0.10 | **94.3%** — already past the Phase 2 truncation gate (≥90%) |
 
-**Notes.** First SFT run on a structurally different env from Sudoku. New tag set: `<observation>` + `<next_state>` + `<viability>` + `<answer>` (renamed per [doc/spec_2026-04-29_pentomino.md](spec_2026-04-29_pentomino.md) §4). **Recipe transfers cross-env on the discrimination metric** — AUC 1.000 vs B-5's 0.726, and 100% precision at τ=0.10 with 94% recall. Greedy still collapses to "always False" (same calibration issue as B-5 — bimodal P(true) with most mass on False) but the *ranking* is perfect. Pentomino's predictive gap is more visually local (isolated unfillable regions are directly visible in the rendered cells) than Sudoku's (constraint cascade across rows/cols/boxes), which likely explains the stronger discrimination. Class imbalance (81% BP) reinforces the "this looks doomed" signal. Full report: [eval_2026-04-30_b7_pentomino_easy.md](eval_2026-04-30_b7_pentomino_easy.md). Required two minor patches: (1) `evaluate_rl.py` `parse_predictions` now accepts both `<solvable>` and `<viability>` tags; (2) `evaluate_solvable_logprob` got a `tag_name` parameter + `--tag-name` CLI flag.
+**Notes.** First SFT run on a structurally different env from Sudoku. New tag set: `<observation>` + `<next_state>` + `<viability>` + `<answer>` (renamed per [doc/spec_pentomino.md](spec_pentomino.md) §4). **Recipe transfers cross-env on the discrimination metric** — AUC 1.000 vs B-5's 0.726, and 100% precision at τ=0.10 with 94% recall. Greedy still collapses to "always False" (same calibration issue as B-5 — bimodal P(true) with most mass on False) but the *ranking* is perfect. Pentomino's predictive gap is more visually local (isolated unfillable regions are directly visible in the rendered cells) than Sudoku's (constraint cascade across rows/cols/boxes), which likely explains the stronger discrimination. Class imbalance (81% BP) reinforces the "this looks doomed" signal. Full report: [eval_2026-04-30_b7_pentomino_easy.md](eval_2026-04-30_b7_pentomino_easy.md). Required two minor patches: (1) `evaluate_rl.py` `parse_predictions` now accepts both `<solvable>` and `<viability>` tags; (2) `evaluate_solvable_logprob` got a `tag_name` parameter + `--tag-name` CLI flag.
 
 ---
 
@@ -245,7 +245,7 @@ v8 = v7 + auxiliary KL anchor on `<viability>`/`<solvable>` tag tokens against t
 
 **Second v8 attempt (autodl, 2026-05-01, in flight)** — relaunched after the fix. JSONL confirms the anchor now fires: `n_via_tokens = 32` per step (= one `<viability>` token per rollout × 32 rollouts). `via_kl = 0.000000` to 6 decimal places through step 25 — the anchor is fully effective at holding viability tokens at SFT logprobs. Step 25 eval: `solvable_acc = 1.0`. Step 50 (v6 collapse point) and step 75 (v7 collapse point) are the discriminating tests still ahead.
 
-**Sudoku v8 anchor experiment (autodl2, 2026-05-01, in flight)** — applies the v8 anchor to Run A's final checkpoint. Hypothesis: the anchor should restore `solvable_acc` from 0.514 → ~0.95 without losing the 33% Pass@1. Validates v8 on a working setup, decoupled from Pentomino's "Pass@1 stuck at 0%" confound. Output: `outputs/rl_b5_phase3_v8_anchor/`. Launcher: [scripts/run_rl_b5_phase3_v8.sh](../scripts/run_rl_b5_phase3_v8.sh).
+**Sudoku v8 anchor experiment (autodl2, 2026-05-01, in flight)** — applies the v8 anchor to Run A's final checkpoint. Hypothesis: the anchor should restore `solvable_acc` from 0.514 → ~0.95 without losing the 33% Pass@1. Validates v8 on a working setup, decoupled from Pentomino's "Pass@1 stuck at 0%" confound. Output: `outputs/rl_b5_phase3_v8_anchor/`. Launcher: [scripts/run_sudoku_4x4_rl_v8_phase3.sh](../scripts/run_sudoku_4x4_rl_v8_phase3.sh).
 
 ### Pending / proposed (not yet started)
 

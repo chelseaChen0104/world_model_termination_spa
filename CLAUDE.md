@@ -2,8 +2,12 @@
 
 > **CLAUDE.md note (2026-04-30):** This file documents the project as of the v3 multi-turn-SFT era. The training-format descriptions below (multi-turn, full XML tag set) are deprecated; the architecture/code references are still accurate. **For a new session: start with [doc/HANDOFF.md](doc/HANDOFF.md) — it's the master pickup point that points to current SPEC, pipeline, workflow, and what's running.**
 
+## SAVE Data Pipeline (parallel project)
+
+SAVE-related code lives under `scripts/sudoku4_*`, `scripts/pentomino5x4_*`, `scripts/hidato5x4_*`, `scripts/save_*`; output under `data/sudoku4/`, `data/pentomino5x4/`, `data/hidato5x4/`. Do not edit existing `src/environments/sudoku*.py`, `src/environments/polyomino*.py`, or `src/environments/hidato*.py` from SAVE work. Per-env specs: [data_generation_sudoku.md](doc/data_generation_sudoku.md), [data_generation_pentomino.md](doc/data_generation_pentomino.md), [data_generation_hidato.md](doc/data_generation_hidato.md). Multi-env plan + locked decisions: [plan_2026-05-03_save_data_generation.md](doc/plan_2026-05-03_save_data_generation.md).
+
 ## Project Goal
-Train an LLM to predict whether a game state is **solvable** (action-conditional: `is_solvable(s_{t+1})` after the model's chosen action), enabling early termination of hopeless episodes. **Breaking points** are derived post-hoc from a `<solvable>` time-series rather than predicted as a separate tag (v4). The primary environment is **Sudoku** (Sokoban is out of scope per [doc/SPEC.md](doc/SPEC.md) §4 — fails predictive-gap criterion).
+Train an LLM to predict whether a game state is **solvable** (action-conditional: `is_solvable(s_{t+1})` after the model's chosen action), enabling early termination of hopeless episodes. **Breaking points** are derived post-hoc from a `<solvable>` time-series rather than predicted as a separate tag (v4). The primary environment is **Sudoku** (Sokoban is out of scope per [doc/spec_project.md](doc/spec_project.md) §4 — fails predictive-gap criterion).
 
 ## Python Environment
 Use anaconda Python: `/Users/siyunchen/opt/anaconda3/bin/python`

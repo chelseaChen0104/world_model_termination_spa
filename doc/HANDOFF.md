@@ -8,7 +8,7 @@ Last updated: 2026-04-29 (B-5 lands). As the project state changes, update §3 (
 
 ## 1. Quick orientation
 
-**Mission (one paragraph):** Train a small LLM (Qwen2.5-1.5B-Instruct) to predict per-state solvability of partially-filled Sudoku puzzles, so an agent can **terminate hopeless episodes early** and save compute during agentic RL. The recipe builds on SPA (Chen et al. 2025) — self-play world-model SFT (state estimation + transition modeling) — and extends it with a `<solvable>` termination tag. The thesis: world-model grounding makes termination prediction reliable in environments with a *predictive gap* (states that look solvable but are already doomed). See [SPEC.md](SPEC.md) for the full research framing.
+**Mission (one paragraph):** Train a small LLM (Qwen2.5-1.5B-Instruct) to predict per-state solvability of partially-filled Sudoku puzzles, so an agent can **terminate hopeless episodes early** and save compute during agentic RL. The recipe builds on SPA (Chen et al. 2025) — self-play world-model SFT (state estimation + transition modeling) — and extends it with a `<solvable>` termination tag. The thesis: world-model grounding makes termination prediction reliable in environments with a *predictive gap* (states that look solvable but are already doomed). See [spec_project.md](spec_project.md) for the full research framing.
 
 **Repo:** [github.com/chelseaChen0104/world_model_termination_spa](https://github.com/chelseaChen0104/world_model_termination_spa)
 
@@ -61,7 +61,7 @@ Located SPA's actual SFT config from their HuggingFace dataset and GitHub:
 
 ## 4. Locked decisions (don't relitigate)
 
-From [SPEC.md](SPEC.md) §7. Each was validated or chosen against alternatives:
+From [spec_project.md](spec_project.md) §7. Each was validated or chosen against alternatives:
 
 | Decision | Why locked |
 |---|---|
@@ -78,7 +78,7 @@ From [SPEC.md](SPEC.md) §7. Each was validated or chosen against alternatives:
 
 ## 5. Open questions (where to push next)
 
-From [SPEC.md](SPEC.md) §2 + [future_steps.md](future_steps.md):
+From [spec_project.md](spec_project.md) §2 + [future_steps.md](future_steps.md):
 
 | Q | Status | Next experiment |
 |---|---|---|
@@ -204,7 +204,7 @@ No collision when sync-down merges to local.
 | Doc | What it is |
 |---|---|
 | [HANDOFF.md](HANDOFF.md) | **You are here.** Master pickup. |
-| [SPEC.md](SPEC.md) | Research scope, locked vs open decisions, success criteria. v5 current. |
+| [spec_project.md](spec_project.md) | Research scope, locked vs open decisions, success criteria. v5 current. |
 | [pipeline_design.md](pipeline_design.md) | How to operate the pipeline (data → SFT → RL → eval) end-to-end. |
 | [pipeline_design.html](pipeline_design.html) | Interactive flow chart with click-through node details. |
 | [workflow.md](workflow.md) | Sync architecture (Mac ↔ cloud ↔ GitHub). |
@@ -219,9 +219,9 @@ No collision when sync-down merges to local.
 | [eval_2026-04-28_sft_track_b_tier_a.md](eval_2026-04-28_sft_track_b_tier_a.md) | Single-turn Tier A eval result on Run B-0 (the multi-turn-collapse) |
 | [report_2026-04-28_sft_b_diagnosis_and_pivot.md](report_2026-04-28_sft_b_diagnosis_and_pivot.md) | The temporal-echo finding + format pivot rationale |
 | [eval_2026-04-29_b5_4x4_spa_replication.md](eval_2026-04-29_b5_4x4_spa_replication.md) ([html](eval_2026-04-29_b5_4x4_spa_replication.html)) | **B-5 results — first SFT run with real discrimination (AUC 0.726).** Closes Q1/Q7/Q8 for SFT. Includes loss plot + SPA-paper comparison. |
-| [qa_2026-04-29_tag_design.md](qa_2026-04-29_tag_design.md) | Why `<breaking_point>`, `<terminate_prob>`, `<steps_left>` were dropped from the SFT format. |
-| [qa_2026-04-30_rl_diagnostics.md](qa_2026-04-30_rl_diagnostics.md) | What the per-step RL log fields mean (KL, pg_loss, clipfrac), how to read them as a health dashboard, and the v6 PPO bug + fix. |
-| [qa_2026-05-01_reward_and_rl.md](qa_2026-05-01_reward_and_rl.md) | Reward + RL mechanics: how action tokens get gradient, why we have step + rollout reward, what dynamic calibration drift is, why Sudoku doesn't need action-quality reward, why there's no separate v8 trainer file. |
+| [qa_2026-04-29_tag_design.md](discussion/qa_2026-04-29_tag_design.md) | Why `<breaking_point>`, `<terminate_prob>`, `<steps_left>` were dropped from the SFT format. |
+| [qa_2026-04-30_rl_diagnostics.md](discussion/qa_2026-04-30_rl_diagnostics.md) | What the per-step RL log fields mean (KL, pg_loss, clipfrac), how to read them as a health dashboard, and the v6 PPO bug + fix. |
+| [qa_2026-05-01_reward_and_rl.md](discussion/qa_2026-05-01_reward_and_rl.md) | Reward + RL mechanics: how action tokens get gradient, why we have step + rollout reward, what dynamic calibration drift is, why Sudoku doesn't need action-quality reward, why there's no separate v8 trainer file. |
 | [runs_reference_2026-05-01.md](runs_reference_2026-05-01.md) | **Structured catalog of every run** — Goal/Status/Hparameters/Data/Checkpoint/Result/Notes per entry. Use this to read across runs at a glance. |
 | [plan_2026-05-01_truncation_experiment.md](plan_2026-05-01_truncation_experiment.md) | Phase 2 truncation experiment plan. Code change spec, threshold selection, options A and B, paper-figure format, risks. |
 | [eval_2026-05-01_truncation_option_a.md](eval_2026-05-01_truncation_option_a.md) | Phase 2 truncation Option A (rollout-only, 10 steps). Superseded by `eval_2026-05-01_truncation_full.md` for the canonical results. |
@@ -234,7 +234,7 @@ No collision when sync-down merges to local.
 | [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md) | **B-7 RL Phase 1 — negative result.** v6 reward + 1-step rollout dominance on 5×4 → calibration regression (greedy `<viability>` flipped True→False). Diagnoses why and proposes 5×5/5-piece variant as the fix. |
 | [paper_data_2026-04-30.md](paper_data_2026-04-30.md) | **Paper data compendium.** All numerical results in paper-ready tables (SFT runs, RL runs, threshold sweeps, P(true) distributions, SPA comparison). Plus pending-experiments roadmap (§9), 5 figures in `doc/plots/paper/`. Reproduce figures via `scripts/generate_paper_plots.py`. |
 | [plan_2026-04-29_rl_approach.md](plan_2026-04-29_rl_approach.md) | **RL training plan**, post-B-5. Phased approach: pure reward shaping → measure precision → conservative truncation. Updates NEAR-1.4/NEAR-2 with B-5-aware reward shape (v5 numbers) and explicit collapse-prevention analysis. |
-| [spec_2026-04-29_pentomino.md](spec_2026-04-29_pentomino.md) | **Pentomino tiling env spec** (second env beyond Sudoku). Game rules, our 5×4-easy / 6×10-full configs, action format, env API, DLX oracle, tag rename for new envs (`<observation>` + `<next_state>` + `<viability>` + `<answer>`), data-gen + training milestones, open questions. |
+| [spec_pentomino.md](spec_pentomino.md) | **Pentomino tiling env spec** (second env beyond Sudoku). Game rules, our 5×4-easy / 6×10-full configs, action format, env API, DLX oracle, tag rename for new envs (`<observation>` + `<next_state>` + `<viability>` + `<answer>`), data-gen + training milestones, open questions. |
 
 ### Reference papers (PDFs)
 - `INTERNALIZING WORLD MODELS VIA SELF-PLAY FINETUNING FOR AGENTIC RL.pdf` — the SPA paper (Chen et al. 2025)
@@ -260,7 +260,7 @@ No collision when sync-down merges to local.
 | `scripts/generate_diverse_data.sh` | 3-difficulty data gen (autodl1 currently running this) |
 | `scripts/combine_diverse_to_minimal.sh` | Combine 3-difficulty parquets + reformat |
 | `scripts/run_4x4_pipeline.sh` | End-to-end 4×4 SPA replication (autodl2 currently running this) |
-| `scripts/run_b4_spa_hparams.sh` | Run B-4 — same data as B-3 with SPA hyperparameters (queued) |
+| `scripts/run_sudoku_9x9_sft_b4.sh` | Run B-4 — same data as B-3 with SPA hyperparameters (queued) |
 | `scripts/reformat_to_minimal.py` | Multi-turn parquet → single-step minimal |
 | `scripts/filter_long_samples.py` | Drop samples > token budget (legacy from multi-turn era) |
 | `scripts/filter_post_bp.py` | Drop (Solvable=False, BP=False) post-BP filler |

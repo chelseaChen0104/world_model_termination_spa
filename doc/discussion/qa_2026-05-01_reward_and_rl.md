@@ -9,8 +9,8 @@ Captures the questions and answers from a deep-dive on how the reward function a
 Companions:
 - [qa_2026-04-30_rl_diagnostics.md](qa_2026-04-30_rl_diagnostics.md) — what KL / pg_loss / clipfrac mean.
 - [rl_walkthrough_2026-04-30.md](rl_walkthrough_2026-04-30.md) — step-by-step trainer walkthrough.
-- [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md) — the v6 collapse + v7/v8 redesigns.
-- [sanity_2026-04-30_b7_rollout_stats.json](sanity_2026-04-30_b7_rollout_stats.json) — empirical numbers cited below.
+- [eval_2026-04-30_b7_rl_phase1.md](../eval_2026-04-30_b7_rl_phase1.md) — the v6 collapse + v7/v8 redesigns.
+- [sanity_2026-04-30_b7_rollout_stats.json](../sanity_2026-04-30_b7_rollout_stats.json) — empirical numbers cited below.
 
 ---
 
@@ -277,7 +277,7 @@ For the paper, the bigger-env story is more generalizable. For RL on the existin
 
 ## Q: There's no separate `rl_trainer_v8.py` file — why?
 
-There isn't, by design. The trainer is a single file: [src/training/rl_trainer_v6.py](../src/training/rl_trainer_v6.py). The "v6/v7/v8" suffixes refer to **reward configurations** (selected at runtime via `--reward-version`), not trainer file versions. The "v6" in the filename is historical (when the trainer was first written, it implemented v6 reward).
+There isn't, by design. The trainer is a single file: [src/training/rl_trainer_v6.py](../../src/training/rl_trainer_v6.py). The "v6/v7/v8" suffixes refer to **reward configurations** (selected at runtime via `--reward-version`), not trainer file versions. The "v6" in the filename is historical (when the trainer was first written, it implemented v6 reward).
 
 ```bash
 # All three live in the same file; the flag picks the reward shape:

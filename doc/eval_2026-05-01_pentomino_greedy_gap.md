@@ -1,5 +1,18 @@
 # Pentomino Greedy Pass@1 Collapse — Mechanism and Implications (2026-05-01)
 
+> **Major correction (2026-05-03):** the no-leak SFT + RL with v8 anchor +
+> `--action-quality-bonus 0.5` achieved **greedy Pass@1 = 100% (30/30)** on
+> 5×4 LPWY when evaluated with the corrected eval pipeline
+> (`sanity_check_checkpoint --prepend-current-state --single-turn-eval
+> --max-response-tokens 512`). The earlier "greedy Pass@1 = 0% on every
+> Pentomino run" claim was based on the in-training `quick_pass1`, which has
+> a multi-turn-history bug. **All earlier Pentomino RL "greedy=0" entries in
+> the table below should be re-checked with the corrected eval before being
+> trusted.** See section "Action-quality bonus + corrected eval pipeline →
+> greedy Pass@1 100%" near the bottom for the full detail. Original analysis
+> below is preserved for the diagnostic narrative; treat its conclusions as
+> superseded for the action-quality-bonus + no-leak setting.
+
 A consolidated report on the **stochastic-vs-greedy gap** observed across all
 Pentomino-easy 5×4 runs in this project. Captures the diagnostic story, the
 data, and what it implies for env choice + paper claims.
@@ -35,6 +48,7 @@ a deficiency to be fixed by tweaking the recipe.
 | B-7 RL v8 (deprecated) | 0% | oscillated 0/1/0/1 → 0 | 0% per-batch throughout |
 | **B-8 SFT** (with augmentation) | **0%** | 1.0 | **22.25%** sanity test |
 | **B-8 RL v8** (in flight) | **0% across 6 evals** | **collapsed → 0** | **16-84% per-batch** |
+| **5×4 RL v8 + action-quality-bonus 0.5** (no-leak SFT) | **0% in-training (BROKEN EVAL) → 100% (30/30) with corrected eval pipeline** | **viability collapsed → all-True** | **100% per-batch from step 41**, Pass@8 stochastic also 100% |
 | **Sudoku Run A** *(reference)* | **33-37%** | 0.55 | similar to greedy |
 | **Sudoku Phase 3 v8 anchor** *(reference)* | **50%** | 0.51 (held) | similar |
 
@@ -122,11 +136,88 @@ training (anchor working), but greedy `solvable_acc` collapsed from 1.0 → 0.0.
 The v8.2 dual-token anchor (anchor BOTH `>true` and `>false` logprobs at every
 viability position regardless of which was sampled) is the targeted fix —
 preserves the relative ordering by construction. **Implementation done; not
-yet tested in flight.** [scripts/run_rl_b8_v8_2.sh](../scripts/run_rl_b8_v8_2.sh).
+yet tested in flight.** [scripts/run_pentomino_5x4_rl_v8_2_dual_anchor.sh](../scripts/run_pentomino_5x4_rl_v8_2_dual_anchor.sh).
 
 But note: **v8.2 fixes the `solvable_acc` greedy collapse, NOT the action-policy
 greedy Pass@1 collapse.** The action policy greedy Pass@1 = 0% is independent
 and structural to the env.
+
+---
+
+## Action-quality bonus + corrected eval pipeline → greedy Pass@1 100% (2026-05-03 result, retracted earlier 0%)
+
+`--action-quality-bonus 0.5` adds a per-step ±0.5 reward on whether the post-action
+state is GT-solvable, providing direct gradient on action goodness independent of
+the `<viability>` prediction.
+
+**Initial finding (in-training quick_pass1, BROKEN):** Pass@1 = 0% across all 8
+evals (steps 25/50/.../200). Per-batch=100% by step 41; reward variance → ±0.00
+by step 143. The training-time eval was running against a multi-turn-history
+prompt format that the model wasn't trained for (same bug we hit on B-H1) — so
+the in-training Pass@1=0% number was an eval-pipeline artifact, NOT a model
+failure.
+
+**Corrected finding (Step 4/4 of pipeline runs `sanity_check_checkpoint` with
+`--prepend-current-state --single-turn-eval --max-response-tokens 512`):**
+
+```
+=== checkpoint sanity check: outputs/rl_pentomino_5x4_no_leak_v8_aq/final ===
+# A. Verbose greedy rollout on puzzle 0 (seed=100000)
+  STEP 0: place L ori=2 at row 1 col 1   valid=True  is_solvable=True
+  STEP 1: place W ori=2 at row 1 col 3   valid=True  is_solvable=True
+  STEP 2: place Y ori=5 at row 2 col 4   valid=True  is_solvable=True
+  STEP 3: place P ori=6 at row 4 col 2   valid=True  success=True
+  → solved=True n_steps=4  full_xml=4/4
+
+# B. Greedy Pass@1 on 30 puzzles
+  Pass@1:                 100.0% (30/30)
+
+# C. Stochastic Pass@k on 30 puzzles, k=8, T=0.7
+  Pass@8:               100.0% (30/30)
+  per-batch solve rate: 100.0% (240/240)
+
+# D. Health checks
+  ❌ viability predictions show both classes: {'true': 120}
+     (single-class → bimodal collapse / regime-1)
+```
+
+**Greedy Pass@1 = 100% (30/30) with the corrected eval pipeline, Pass@8 = 100%.**
+The model fully learned the 5×4 LPWY puzzle; both greedy and stochastic decoding
+solve every test puzzle.
+
+**What this means for the regime-3 hypothesis on Pentomino-easy.**
+
+The earlier section above ("Why Pentomino-easy is structurally regime 3") argued
+that 5×4 with 4 pieces has a sparse-enough action space that argmax cannot land
+on a valid solution path even with a well-trained policy. That conclusion was
+based on the broken in-training eval. With the corrected eval, **5×4 is NOT
+structurally regime 3** — sufficient RL training (v8 anchor + action-quality-bonus,
+200 steps) lifts both greedy AND stochastic to 100%. The action policy is excellent
+under argmax; the regime-3 framing was an artifact.
+
+**What's still genuine.**
+
+The viability prediction has collapsed to all-`True` (`{'true': 120}` across all
+120 step-decisions in the eval) — the calibration is gone in the canonical
+regime-1 sense. But because the action policy never visits a doom state on
+this puzzle (every greedy action lands on `is_solvable=True`), the always-True
+prediction happens to be vacuously correct. The viability tag is essentially
+unused as a termination signal here.
+
+This is itself an important finding: **on a denser-than-expected puzzle, the
+viability tag becomes vestigial and the action policy alone carries the load**.
+The truncation-gate experiments only matter for envs/puzzles where doom states
+are actually reachable under a well-trained policy; for 5×4 LPWY post-RL,
+they aren't.
+
+**Pending re-checks for prior Pentomino claims.** B-7 and B-8 RL Pass@1=0%
+numbers in the table above were also based on the in-training quick_pass1 with
+the same multi-turn-history bug. Those checkpoints should be re-evaluated with
+`sanity_check_checkpoint --prepend-current-state --single-turn-eval` before the
+"every Pentomino run greedy=0" claim in the TL;DR can stand. Likely outcome:
+the older claims partially hold (B-7 SFT at 0% even pre-RL, where the action
+policy hadn't been sharpened yet) but the RL-trained checkpoints may all
+actually be much higher than reported.
 
 ---
 

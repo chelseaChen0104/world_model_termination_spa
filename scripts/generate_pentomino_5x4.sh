@@ -1,5 +1,5 @@
 #!/bin/bash
-# Generate pentomino-easy LLM-policy data (per doc/spec_2026-04-29_pentomino.md §7).
+# Generate pentomino-easy LLM-policy data (per doc/spec_pentomino.md §7).
 #
 # Easy variant: 5×4 board with pieces {L, P, W, Y} (locked by P-0, 20 distinct tilings).
 # Target: ~3,000 trajectories → ~6,000 single-step samples after no_post_bp filter.

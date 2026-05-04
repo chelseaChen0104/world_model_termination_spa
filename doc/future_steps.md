@@ -1,6 +1,6 @@
 # Future Steps — World Model Termination Prediction
 
-Living to-do list of work that's queued for later. Distinct from [SPEC.md](SPEC.md) (the research-scope spec) and [pipeline_design.md](pipeline_design.md) (the operational runbook). When an item is done, move it to "Completed" or delete.
+Living to-do list of work that's queued for later. Distinct from [spec_project.md](spec_project.md) (the research-scope spec) and [pipeline_design.md](pipeline_design.md) (the operational runbook). When an item is done, move it to "Completed" or delete.
 
 Each item has: priority, estimated effort, dependency on prior items, and expected output. Re-read this list at the start of each work session before deciding what to do next.
 
@@ -67,7 +67,7 @@ Each item has: priority, estimated effort, dependency on prior items, and expect
 ## Near-term (next 1–2 weeks, after IMM is settled)
 
 ### NEAR-1 — SPA paper baselines (the load-bearing comparison gap)
-- **Priority:** required for any publication-quality result per [SPEC.md](SPEC.md) §3
+- **Priority:** required for any publication-quality result per [spec_project.md](spec_project.md) §3
 - **Effort:** ~3–6 GPU-hours per baseline
 - **Three baselines to run on the same Sudoku setup:**
   1. **Vanilla RL** — base Qwen2.5-1.5B + PPO with task-success reward only. No SFT cold-start. (Code: existing `rl_trainer.py` with reward zeroed except success.)
@@ -143,12 +143,24 @@ There are **three distinct ways** the `<solvable>` tag can interact with RL, and
 - **Effort:** scripted, ongoing
 - Each completed eval/training run should land a dated writeup in `doc/eval_<date>_<topic>.md` per the saved `doc_folder_convention` memory.
 
+### NEAR-6 — Expand Hidato puzzle bank (mitigate memorization risk)
+- **Priority:** **load-bearing for Hidato result credibility.** Current bank has only 8 hand-curated puzzles; training data has 98.5% exact-duplicate rate (~183 unique samples after augmentation × 30 oversample); eval cycles through the same 8 puzzles ~3.75× per 30-puzzle eval. The 60% Pass@1 we report post-RL on Hidato is partly memorization-driven; held-out generalization is untested.
+- **Why it matters:** for the paper claim "Hidato Pass@1 lifts from 16.7% (SFT) to 60% (RL)" to be defensible, we need to evaluate on puzzles the model has *never seen* during training. Without this, a reviewer can reasonably push back that the result is memorization.
+- **Effort:** ~1 day
+- **What to do:**
+  1. Algorithmic generation in `src/environments/hidato_puzzle_bank.py`: random Hamiltonian-path search over an `R×C` grid (3×3 to 6×6) → strip 30-50% of cells → verify uniqueness via the existing `is_solvable` checker.
+  2. Generate ~200 puzzles total, split into train (160) / val (20) / **held-out (20)**.
+  3. Update `HidatoEnv.reset()` to optionally use a held-out subset for eval (via a `--puzzle-set held-out` env flag).
+  4. Re-run the existing Hidato SFT + RL pipeline; report Pass@1 on the held-out 20 puzzles and compare to the in-distribution 60%.
+- **Output:** an honest Hidato Pass@1 number on never-seen puzzles. This is what goes in the paper.
+- **Companion fix:** drop the `--aug-repeat 30` oversample for the new dataset (with 200× more diverse augmented samples, oversample is unnecessary). Should naturally fix the duplicate-rate metric.
+
 ---
 
 ## Medium-term (next 1–2 months — NeurIPS-track scope)
 
 ### MED-1 — Add Kakuro environment
-- **Priority:** load-bearing for the cross-environment story per [SPEC.md](SPEC.md) §5
+- **Priority:** load-bearing for the cross-environment story per [spec_project.md](spec_project.md) §5
 - **Effort:** ~3–5 days
 - **What to do:**
   1. Add `src/environments/kakuro.py` matching `BaseTerminationEnv` interface.
@@ -185,7 +197,7 @@ There are **three distinct ways** the `<solvable>` tag can interact with RL, and
 
 ### LT-1 — Polyomino tiling environment
 - Adds topology-flavored predictive gap (unfillable holes). Different "shape" of failure than constraint propagation. Distinct enough to argue cross-domain.
-- See [SPEC.md](SPEC.md) §5 Tier 2 candidates.
+- See [spec_project.md](spec_project.md) §5 Tier 2 candidates.
 
 ### LT-2 — Difficulty-curriculum SFT
 - Currently Sudoku-easy only. Could vary 4×4 / 6×6 / 9×9 to argue the recipe scales with difficulty.

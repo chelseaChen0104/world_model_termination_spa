@@ -147,10 +147,10 @@ wall time and final Pass@1.
 
 ```bash
 # Run 1 (truncation OFF):
-bash scripts/run_rl_b5_truncation_off.sh    # 50 steps, otherwise like Run A
+bash scripts/run_truncation_exp_option_b.sh    # OFF arm    # 50 steps, otherwise like Run A
 
 # Run 2 (truncation ON):
-bash scripts/run_rl_b5_truncation_on.sh     # same but truncation_mode=conservative
+bash scripts/run_truncation_exp_option_b.sh    # ON arm     # same but truncation_mode=conservative
 ```
 
 **Pros**:

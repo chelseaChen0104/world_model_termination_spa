@@ -10,8 +10,8 @@
 # Full Phase 1 run (after smoke test): N_TOTAL_STEPS=200 → ~6-12h
 #
 # Usage:
-#   bash scripts/run_rl_b5_phase1.sh                # smoke test (50 steps)
-#   N_TOTAL_STEPS=200 bash scripts/run_rl_b5_phase1.sh   # full Phase 1
+#   bash scripts/run_sudoku_4x4_rl_v6_phase1.sh                # smoke test (50 steps)
+#   N_TOTAL_STEPS=200 bash scripts/run_sudoku_4x4_rl_v6_phase1.sh   # full Phase 1
 
 set -e
 cd /root/autodl-tmp/world_model_termination_spa

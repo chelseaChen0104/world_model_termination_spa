@@ -1,6 +1,6 @@
 # Pentomino Tiling Env — Spec & Plan (2026-04-29)
 
-Second environment for the "world model SFT for termination prediction" recipe. Companion to [doc/SPEC.md](SPEC.md) (project-level scope) and [doc/plan_2026-04-29_rl_approach.md](plan_2026-04-29_rl_approach.md) (RL approach). Diversifies the project beyond Sudoku by adding a structurally different problem class — geometric packing instead of value-placement.
+Second environment for the "world model SFT for termination prediction" recipe. Companion to [doc/spec_project.md](spec_project.md) (project-level scope) and [doc/plan_2026-04-29_rl_approach.md](plan_2026-04-29_rl_approach.md) (RL approach). Diversifies the project beyond Sudoku by adding a structurally different problem class — geometric packing instead of value-placement.
 
 This doc:
 1. Pins the puzzle rules and our specific configuration (§1–§3)
@@ -268,7 +268,7 @@ This pre-computation is cheap (~ms total) and keeps per-state oracle calls fast.
 | **P-2** | `src/environments/polyomino_utils.py` — `PolyominoSolvabilityChecker` (DLX) + piece-orientation tables | ~1 day | env step (calls oracle) |
 | **P-3** | `src/data/sft_formatter.py` — new variant `polyomino_minimal` with `<observation>` + `<next_state>` + `<viability>` + `<answer>` | ~1 hour | SFT data |
 | **P-4** | `src/data/llm_trajectory_generator.py` — verify env-agnostic; add `--env polyomino` flag | ~half day | LLM-policy data gen |
-| **P-5** | `scripts/generate_pentomino_easy.sh` + `scripts/generate_pentomino_full.sh` | ~30 min | data gen on cloud |
+| **P-5** | `scripts/generate_pentomino_5x4.sh` + `scripts/generate_pentomino_full.sh` | ~30 min | data gen on cloud |
 | **P-6** | Smoke test: 50 random-policy trajectories on 5×4 easy, manually inspect | ~1 hour | confidence |
 | **P-7** | LLM-policy trajectory gen on autodl1: 5×4 easy variant, ~3,000 trajectories → ~6,000 SFT samples | ~3-4h on H800 | SFT training |
 | **P-8** | Reformat + filter (`reformat_to_minimal.py`, `filter_post_bp.py` — should be env-agnostic, verify) | ~30 min | training |
@@ -345,7 +345,7 @@ These are flagged here so they don't block P-1/P-2 from starting. Decisions can 
 
 ## 9. Cross-references
 
-- **Project SPEC**: [doc/SPEC.md](SPEC.md) §1 (predictive-gap criterion), §2 Q6 (cross-env generalization)
+- **Project SPEC**: [doc/spec_project.md](spec_project.md) §1 (predictive-gap criterion), §2 Q6 (cross-env generalization)
 - **RL approach** (will reuse for pentomino once SFT is working): [doc/plan_2026-04-29_rl_approach.md](plan_2026-04-29_rl_approach.md) — same v6 reward shape, same phased training, just `<solvable>` → `<viability>` everywhere
-- **Tag-design rationale**: [doc/qa_2026-04-29_tag_design.md](qa_2026-04-29_tag_design.md) — why we keep the 4-tag minimal set
+- **Tag-design rationale**: [doc/qa_2026-04-29_tag_design.md](discussion/qa_2026-04-29_tag_design.md) — why we keep the 4-tag minimal set
 - **Runs ledger**: [doc/runs_ledger_2026-04-29.md](runs_ledger_2026-04-29.md) — pentomino runs will append here as `B-7+` once SFT lands

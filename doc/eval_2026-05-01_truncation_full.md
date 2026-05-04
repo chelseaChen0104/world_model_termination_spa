@@ -131,12 +131,19 @@ ssh autodl2 'cd /root/autodl-tmp/world_model_termination_spa && \
 
 ---
 
-## Methodology fix going forward
+## Methodology fix going forward (hygiene only — does NOT close the −10pp)
 
 The eval-during-training conflation is a real bug we should fix in the trainer:
 `quick_pass1()` should always run with `truncation_mode=off`, regardless of the
 training mode. The training rollouts get the gate; the eval should always be a
 clean measurement.
+
+**Important**: this is hygiene. The headline −10pp Pass@1 number above already
+comes from a clean re-eval (gate forced off), so fixing `quick_pass1()` will
+*not* change the −10pp — it just makes future training-log Pass@1 numbers
+trustworthy without an extra re-eval pass. The actual −10pp is a real
+training-time degradation in the gate-on RL'd checkpoint vs the gate-off RL'd
+checkpoint; the fix for *that* is recipe-level (see "Open questions" §3-§4).
 
 Suggested patch (one-line guard inside `quick_pass1`):
 ```python
@@ -224,55 +231,144 @@ lets those rollouts run a bit longer before the gate kicks in.
 ### Min-step sweep experiment
 
 Sweeps `min_step ∈ {0, 1, 2, 3, 4}` at fixed τ=0.99, 10 rollout-collection
-steps each, on the v8 anchor checkpoint. Currently in flight on autodl2.
+steps each, on the v8 anchor checkpoint.
 Launcher: [scripts/run_truncation_min_step_sweep.sh](../scripts/run_truncation_min_step_sweep.sh).
 
-### Expected outcome
+### Results (2026-05-01)
 
-If the gate fires a lot of *premature* truncations (rollouts that would
-have recovered if allowed to continue), `min_step=3` should:
-- Truncate fewer rollouts (e.g., 30-40% instead of 55%)
-- Preserve more per-batch solve rate (closer to OFF's 40% than ON's 33%)
-- Save somewhat less compute (lower truncation rate → less savings)
+Aggregate stats reported by the trainer at end of 10-step rollout collection
+(`n=320` rollouts per setting, batch=4 puzzles × group=8):
 
-If the gate is already only firing on truly-doomed rollouts (no
-premature truncations), `min_step=3` should:
-- Truncate similar fraction (since the model only says False with high
-  confidence on actually-doomed states)
-- No meaningful change in solve rate or savings
+| min_step | mean_len | tokens/step | truncated/320 | trunc % | per-batch solve | rollout time |
+|---------:|---------:|------------:|--------------:|--------:|----------------:|-------------:|
+| 0        | 3.48     | 12,415      | 176           | 55.0%   | 32.8%           | 13.98s       |
+| 1        | 3.51     | 12,529      | 176           | 55.0%   | 32.5%           | 14.24s       |
+| 2        | 3.86     | 13,766      | 116           | 36.2%   | 32.5%           | 14.71s       |
+| 3        | 4.16     | 14,841      | 54            | 16.9%   | 31.2%           | 14.89s       |
+| 4        | 4.28     | 15,268      | 39            | 12.2%   | 32.2%           | 14.66s       |
 
-The result discriminates between two interpretations of the −10pp Pass@1
-cost: structural-doom-classification vs eval-time premature termination.
+**Findings**:
+
+1. **`min_step=0` and `min_step=1` are identical** (55.0% truncation, ~12.5k
+   tokens/step). The gate never actually fires at step 0 — at the very first
+   prediction the model never says ">false" with τ ≥ 0.99 confidence
+   (consistent with a fresh board having no committed moves to flag as doom).
+
+2. **Raising `min_step` monotonically reduces truncation rate**: 55% → 36% →
+   17% → 12% as we delay the gate from step 1 → 2 → 3 → 4. Tokens/step rises
+   correspondingly (+11% / +19% / +23%). The gate is firing predominantly
+   at steps 1–2.
+
+3. **Per-batch in-rollout solve rate is essentially flat (31–33%) across
+   the entire sweep**. The truncation gate is saving compute without
+   reducing the fraction of solvable puzzles that get solved during
+   training. Disabling the gate at later steps just keeps already-doomed
+   rollouts running longer — it does *not* recover puzzles that were
+   prematurely killed.
+
+4. **Min-step sweep proves a weaker thing than originally claimed.**
+   - The sweep shows per-batch solve rate (1-of-8 stochastic) flat across
+     `min_step ∈ {0..4}`. This means the gate's false-positive rate is
+     *low enough that 8 stochastic samples per puzzle absorb it as
+     noise* — not that the gate is 100% precise.
+   - Crucially, **eval-time Pass@1 is 1-of-1 greedy**. No recovery margin.
+     Even a 7–8% per-firing FP rate would look flat in per-batch (because
+     1 of 8 stochastic rollouts always survives) but cost ~15pp on greedy
+     Pass@1 — which is roughly what we see (the v8 anchor checkpoint
+     shows 50% → 30% Pass@1, gate-OFF eval → gate-ON eval, [§ Pass@1
+     trajectory under each condition](#pass1-trajectory-under-each-condition-with-eval-side-truncation-effects)
+     line "0 (init)").
+   - So the gate is NOT 100% accurate; the min-step sweep just doesn't
+     have the resolution to detect its FP rate. The per-batch metric is
+     forgiving by 8× sampling; Pass@1 is not.
+
+   **The −10pp Pass@1 cost (clean re-eval) is still a real training-time
+   degradation in the trained model itself**, not an eval artifact. It
+   comes from comparing **two distinct RL-trained checkpoints**
+   (`trunc_exp_b_off/final` vs `trunc_exp_b_on_tau0.99/final`), both
+   evaluated cleanly with `truncation_mode=off`.
+   - However, the −10pp Pass@1 number ([§ Clean re-eval](#clean-re-eval-pass1-disambiguated))
+     comes from comparing the **two distinct RL-trained checkpoints**
+     (`trunc_exp_b_off/final` vs `trunc_exp_b_on_tau0.99/final`), both
+     evaluated cleanly with `truncation_mode=off`. So the gap is real
+     degradation in the *trained model itself*, not an eval-measurement
+     artifact. The min-step sweep narrows the search but does not pin
+     down the actual mechanism.
+   - **Remaining candidate mechanisms** (none disproven yet):
+     1. *Truncated reward signal* — gate-on rollouts terminate before
+        seeing their true return; bias against "keep going".
+     2. *PPO advantage estimation on truncated trajectories* — partial
+        returns underestimate value for would-have-solved cases.
+     3. *Effective training-distribution shift* — gate kills rollouts
+        before the late-trajectory states are visited; the policy gets
+        less gradient signal on long-horizon recovery patterns.
+     4. *Greedy/stochastic decoupling* — per-batch (1-of-8 stochastic)
+        is forgiving; greedy Pass@1 (1-of-1) is what actually regresses.
+        These mechanisms could degrade greedy without showing up in
+        per-batch rollout solve rate.
+
+5. **Optimal min-step setting (compute savings only): `min_step=0`** —
+   55% truncation rate, ~22% token reduction. There is no quality reason
+   to delay the gate within the min-step axis itself; that lever doesn't
+   touch the −10pp Pass@1 cost.
+
+Caveat: 4 of 5 sweep runs failed to checkpoint at the very end with
+"No space left on device" — autodl2 was at the disk-full edge. The
+in-rollout statistics are unaffected (computed before save), so the
+table above is the real result; the sweep is functionally complete.
 
 ### Combined with v8.2 anchor
 
 Independent axis: v8.2 (dual-token anchor) addresses the *bimodality*
 of confidence directly by anchoring both `>true` and `>false` logprobs.
-Min-step gates orthogonally on *trajectory position*. Both can be combined
-(`--reward-version v8 --dual-token-anchor --truncation-min-step 3`) for
-a v8.2 + min-step combined gate experiment.
+Min-step gates orthogonally on *trajectory position*. The min-step sweep
+above shows there is no quality benefit to delaying the gate, so the
+v8.2 + min-step combination is no longer the priority — v8.2 alone with
+`min_step=0` is the natural next experiment.
 
 ### Status (2026-05-01)
 
 - [x] Trainer code patched (`truncation_min_step` config + CLI flag)
 - [x] Sweep launcher written (`run_truncation_min_step_sweep.sh`)
-- [ ] Sweep results (in flight on autodl2 at time of writing)
+- [x] Sweep results collected (autodl2)
 
 ---
 
 ## Open questions for follow-up
 
-1. **τ-sweep** (DONE — bimodal confidence; tuning τ alone doesn't help).
-2. **min-step sweep** (in flight; will inform whether premature-termination
-   is the dominant cost driver).
-3. **v8.2 dual-token anchor** (implemented, pending RL run; addresses the
-   underlying bimodality).
-2. **Eval-during-training fix**: patch `quick_pass1()` to always run with
-   truncation_mode=off, so eval Pass@1 in training logs is clean by default.
-   Future runs would not need a separate re-eval. ~10 min code.
-3. **Larger N for the τ-sweep statistics**: 30-puzzle eval has noticeable variance
-   (one puzzle = 3.3pp). For paper-quality numbers, eval at 100+ puzzles. ~30 min more
-   GPU per condition.
+The −10pp Pass@1 cost between gate-on and gate-off RL'd checkpoints is a
+real training-time degradation in the trained model. Min-step ruled out one
+mechanism (in-training kills of recoverable rollouts); the other candidate
+mechanisms (truncated reward signal, PPO advantage bias on partial returns,
+training-distribution shift, greedy/stochastic decoupling) are all
+unresolved.
+
+1. **τ-sweep** (DONE — bimodal confidence; tuning τ alone doesn't move the
+   gate's behavior).
+2. **min-step sweep** (DONE — `min_step=0` optimal; in-training kills
+   are well-targeted, but this lever doesn't touch the −10pp).
+3. **v8.2 dual-token anchor** (in flight — autodl2). Original motivation
+   was eval-time bimodality; given the corrected interpretation, v8.2's
+   relevance to the −10pp is now via *training-time* effects: better
+   `<solvable>` calibration during training → fewer false-positive gate
+   fires during rollout collection → less reward-signal contamination.
+   Whether this fully closes the −10pp is the open empirical question.
+4. **"Train without gate, deploy with gate" experiment** (NEW priority,
+   not yet run). If the −10pp is purely a training-time artifact, then a
+   model RL'd *without* the gate (gate-off arm checkpoint already exists:
+   `outputs/trunc_exp_b_off/final/`) and *deployed* with the gate at
+   inference should give the clean headline: "compute saved at deployment,
+   no Pass@1 cost." Concretely: take the OFF-final checkpoint, run a clean
+   eval with `truncation_mode=off` AND with `truncation_mode=conservative
+   --truncation-threshold 0.99`, compare per-puzzle tokens/seconds and
+   Pass@1. ~30 min GPU. This is the cheapest path to a defensible "the
+   gate works at deployment" claim, independent of v8.2.
+5. **Eval-during-training fix**: patch `quick_pass1()` to always run
+   with `truncation_mode=off` — see [Methodology fix going forward](#methodology-fix-going-forward-hygiene-only--does-not-close-the-10pp)
+   above. Hygiene-only, not a fix for the −10pp. ~10 min code.
+6. **Larger N for τ-sweep / Pass@1 statistics**: 30-puzzle eval has
+   noticeable variance (one puzzle = 3.3pp). For paper-quality numbers,
+   eval at 100+ puzzles. ~30 min more GPU per condition.
 
 ---
 

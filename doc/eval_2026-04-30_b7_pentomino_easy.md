@@ -4,7 +4,7 @@
 
 **B-7 (5×4 Pentomino with `{L, P, W, Y}` pieces, B-5 hparams) hits ROC AUC = 1.000 — perfect `<viability>` discrimination.** This is the first cross-env transfer test of the recipe, and the discrimination signal is *stronger* than the 4×4 Sudoku baseline (B-5 AUC = 0.726).
 
-The recipe transfers cleanly from Sudoku to a structurally different env (geometric piece placement vs cell-value puzzle), and the new tag set (`<observation>` + `<next_state>` + `<viability>` + `<answer>`) works end-to-end. See [doc/spec_2026-04-29_pentomino.md](spec_2026-04-29_pentomino.md) for the env spec.
+The recipe transfers cleanly from Sudoku to a structurally different env (geometric piece placement vs cell-value puzzle), and the new tag set (`<observation>` + `<next_state>` + `<viability>` + `<answer>`) works end-to-end. See [doc/spec_pentomino.md](spec_pentomino.md) for the env spec.
 
 ## Setup
 
@@ -120,11 +120,11 @@ What we *can* say: SPA demonstrates the world-modeling SFT recipe transfers with
 ```bash
 # Data generation
 ssh autodl 'cd /root/autodl-tmp/world_model_termination_spa && \
-            N_TRAJ=3000 bash scripts/generate_pentomino_easy.sh'
+            N_TRAJ=3000 bash scripts/generate_pentomino_5x4.sh'
 
 # B-7 SFT
 ssh autodl 'cd /root/autodl-tmp/world_model_termination_spa && \
-            bash scripts/run_b7_pentomino_easy_sft.sh'
+            bash scripts/run_pentomino_5x4_sft.sh'
 
 # B-7 eval (greedy + viability-logprob)
 ssh autodl 'cd /root/autodl-tmp/world_model_termination_spa && \

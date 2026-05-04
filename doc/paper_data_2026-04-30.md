@@ -287,7 +287,7 @@ For the paper's results section, organized by claim:
 - The collapse is therefore a *dynamic* failure of the optimizer: noisy GRPO advantages walk the policy off the SFT optimum faster than the global KL leash (averaged over ~150 response tokens, kl_coef=0.05) can pull it back. Once off-manifold, the policy falls into the always-False basin and the local gradient keeps it there.
 - The fix (v8 reward) adds an auxiliary KL penalty applied *only on the `<viability>` / `<solvable>` tag content tokens* against the frozen SFT reference, with coefficient 0.5. Concentrated on the 1-3 tokens that matter for calibration, it's much stronger per-token than the global KL while leaving action tokens free to optimize.
 - Implementation correctness was non-trivial: a tokenization roundtrip mismatch (trailing EOS) caused the position finder to silently no-op for ~100 steps before it was caught. The fix re-decodes `response_ids` ourselves and tolerates trailing-EOS mismatches via prefix matching. Positions are now cached on `StepRecord.viability_token_positions` at rollout time.
-- v8-fixed early signals (step 50, in flight at time of writing): `via_kl = 0.000000` to 6 decimal places (anchor effective), `solvable_acc` held at 1.0 through the v6 collapse point. Step 75 (v7 collapse point) and Sudoku Run A v8 anchor are the two active discriminating tests. ([qa_2026-05-01_reward_and_rl.md](qa_2026-05-01_reward_and_rl.md), [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md) "Option D".)
+- v8-fixed early signals (step 50, in flight at time of writing): `via_kl = 0.000000` to 6 decimal places (anchor effective), `solvable_acc` held at 1.0 through the v6 collapse point. Step 75 (v7 collapse point) and Sudoku Run A v8 anchor are the two active discriminating tests. ([qa_2026-05-01_reward_and_rl.md](discussion/qa_2026-05-01_reward_and_rl.md), [eval_2026-04-30_b7_rl_phase1.md](eval_2026-04-30_b7_rl_phase1.md) "Option D".)
 
 ---
 
@@ -356,7 +356,7 @@ These are blocking for a *complete* paper:
 |---|---|
 | Does the AUC=1.0 finding hold on a 6×10 board with all 12 pentominoes (the canonical research benchmark)? | Run B-10 with 6×10 / 12-piece config. Bigger predictive gap, harder to memorize. |
 | Does the discrimination signal transfer to a third env (e.g., MKD — maze with keys & doors, where the predictive gap is path-dependent rather than visually local)? | Build MKD env (~2 days), run SFT + eval. |
-| Does the temporal-echo failure mode (B-0) generalize to multi-turn world-model SFT on other puzzle envs? | Originally proposed Q6 in SPEC.md; still untested. |
+| Does the temporal-echo failure mode (B-0) generalize to multi-turn world-model SFT on other puzzle envs? | Originally proposed Q6 in spec_project.md; still untested. |
 | What's the minimum SFT data scale for the discrimination signal to emerge on each env? | Sweep N_TRAJ ∈ {500, 1000, 2000, 3000} for both Sudoku 4×4 and Pentomino 5×4. |
 
 ### 9.5 Decision points for paper scope
@@ -403,7 +403,7 @@ Total: ~6-7 pages, fits NeurIPS 9-page limit comfortably.
 ## 11. Reproducibility checklist
 
 - All code: GitHub repo (link to `chelseaChen0104/world_model_termination_spa`).
-- All data: regeneratable via `scripts/generate_*_spa_scale.sh` and `scripts/generate_pentomino_easy.sh`.
+- All data: regeneratable via `scripts/generate_*_spa_scale.sh` and `scripts/generate_pentomino_5x4.sh`.
 - All training: launchers `scripts/run_b{5,7}_*.sh` and `scripts/run_rl_b{5,7}_phase1.sh`.
 - All eval logs: `logs/eval_b*.log` (parsed for §3 numbers).
 - All RL logs: `outputs/rl_b*/rl_log.jsonl` (parsed for §4 numbers).

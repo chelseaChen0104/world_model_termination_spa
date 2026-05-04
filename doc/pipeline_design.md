@@ -1,12 +1,12 @@
 # Pipeline Design — Data Gen → SFT → RL → Eval
 
-Operational guide. For research rationale see [SPEC.md](SPEC.md); for architecture see [CLAUDE.md](../CLAUDE.md); for chronological history see [progress.md](../progress.md).
+Operational guide. For research rationale see [spec_project.md](spec_project.md); for architecture see [CLAUDE.md](../CLAUDE.md); for chronological history see [progress.md](../progress.md).
 
 **Visual version:** open [pipeline_design.html](pipeline_design.html) in a browser for an interactive flow chart with click-through node details. (Note: the HTML viz reflects the v3 multi-turn pipeline and needs updating to v4 single-step format.)
 
-This doc is a **runbook**: what to run in what order, what each step produces, what success looks like at each stage. Sudoku-only per [SPEC.md](SPEC.md). Components not yet implemented are flagged 🚧.
+This doc is a **runbook**: what to run in what order, what each step produces, what success looks like at each stage. Sudoku-only per [spec_project.md](spec_project.md). Components not yet implemented are flagged 🚧.
 
-> **v4 update (2026-04-28):** SFT format changed from multi-turn to **single-step samples** with minimal XML response (`<observation>` + `<prediction>` + `<solvable>` + `<answer>`). `<breaking_point>`, `<terminate_prob>`, `<steps_left>` tags dropped. See [SPEC.md](SPEC.md) §7.5 v4 and [report_2026-04-28_sft_b_diagnosis_and_pivot.md](report_2026-04-28_sft_b_diagnosis_and_pivot.md) for the rationale.
+> **v4 update (2026-04-28):** SFT format changed from multi-turn to **single-step samples** with minimal XML response (`<observation>` + `<prediction>` + `<solvable>` + `<answer>`). `<breaking_point>`, `<terminate_prob>`, `<steps_left>` tags dropped. See [spec_project.md](spec_project.md) §7.5 v4 and [report_2026-04-28_sft_b_diagnosis_and_pivot.md](report_2026-04-28_sft_b_diagnosis_and_pivot.md) for the rationale.
 
 ---
 
@@ -87,7 +87,7 @@ Two parallel tracks. Both write parquet files to `data/<name>/wm_train.parquet` 
 
 ### 2.1 Stage 1A — Random-play multi-turn (CPU, fast intermediate)
 
-**Purpose:** quick warm-start data + pipeline smoke test. Acknowledged off-distribution per [SPEC.md](SPEC.md) §4.
+**Purpose:** quick warm-start data + pipeline smoke test. Acknowledged off-distribution per [spec_project.md](spec_project.md) §4.
 
 **Script:** [`scripts/regen_random_multiturn.py`](../scripts/regen_random_multiturn.py)
 
@@ -166,14 +166,14 @@ LLMTrajectoryGenerator(model="Qwen/Qwen2.5-1.5B-Instruct", temperature=0.7, devi
             #   <answer>      ← step.action_name     (what was executed)
             #
             # Multi-turn prior assistant turns use step.llm_raw_response if present,
-            # else template-generated ground truth (see SPEC.md §7.5 format constraints).
+            # else template-generated ground truth (see spec_project.md §7.5 format constraints).
             └─> save to data/sudoku_llm_policy/
 ```
 
-**Three format concerns to keep separate (see [SPEC.md](SPEC.md) §7.5):**
+**Three format concerns to keep separate (see [spec_project.md](spec_project.md) §7.5):**
 1. **LLM generation output** during data gen — only `<answer>` must be parseable; rest is forgiving.
 2. **SFT target row** — full XML, **all content from env ground truth**, not from LLM output.
-3. **Multi-turn prior-turn content** — currently uses LLM raw response (may be malformed). Open research decision; see SPEC.md.
+3. **Multi-turn prior-turn content** — currently uses LLM raw response (may be malformed). Open research decision; see spec_project.md.
 
 **Run on AutoDL:**
 ```bash
@@ -203,7 +203,7 @@ tmux new-session -d -s trackB "bash -lc \"bash scripts/_run_with_env.sh bash scr
 
 **Script:** [`src/training/simple_sft_trainer.py`](../src/training/simple_sft_trainer.py)
 
-**Per [SPEC.md](SPEC.md) §7 locked decisions:**
+**Per [spec_project.md](spec_project.md) §7 locked decisions:**
 - HuggingFace `Trainer` (single-GPU; FSDP `sft_trainer.py` is dead code).
 - Loss: cross-entropy on response tokens only. For multi-turn: only the **final** assistant turn has real labels; prior assistant turns in the prompt are masked with `-100`.
 - Base model: `Qwen/Qwen2.5-1.5B-Instruct`.
@@ -239,7 +239,7 @@ tmux new-session -d -s sft_a "bash -lc \"bash scripts/_run_with_env.sh python sr
 
 ### 3.2 SFT on LLM-policy data — minimal single-step format (headline, v4)
 
-> **Updated 2026-04-28** to single-step format per [SPEC.md](SPEC.md) §7.5 v4.
+> **Updated 2026-04-28** to single-step format per [spec_project.md](spec_project.md) §7.5 v4.
 
 Source data is `data/sudoku_llm_policy_minimal/` — produced by [scripts/reformat_to_minimal.py](../scripts/reformat_to_minimal.py) reformatting the existing Track B multi-turn parquets in place (no GPU regeneration needed).
 
@@ -297,7 +297,7 @@ LiveEnvTerminationRLTrainer(
 
 ### 4.2 Reward v2 (compute_termination_reward_v2)
 
-Per [SPEC.md](SPEC.md) §7 locked:
+Per [spec_project.md](spec_project.md) §7 locked:
 
 | Component | Value | Rationale |
 |---|---|---|
@@ -326,7 +326,7 @@ tmux new-session -d -s rl "bash -lc \"bash scripts/_run_with_env.sh python src/t
 
 **Wall time on H800:** highly dependent on config; expect **multiple hours**.
 
-**Verification (per [SPEC.md](SPEC.md) §6 anti-goals):**
+**Verification (per [spec_project.md](spec_project.md) §6 anti-goals):**
 - BP recall on eval *increasing* during training, not just total reward (otherwise model is reward-hacking).
 - Pass@1 on Sudoku not collapsing (Q2 trip-wire — termination training shouldn't break the SPA agent).
 - Format compliance staying ≥99% (XML tags present in nearly all outputs).
@@ -359,7 +359,7 @@ bash scripts/_run_with_env.sh python evaluate_rl.py \
 
 ### 5.2 SPA-comparable metrics — ✅ implemented
 
-Per [SPEC.md](SPEC.md) §3 success criteria, headline reporting must include **Pass@1 and Pass@8** for direct comparability with SPA Table 2.
+Per [spec_project.md](spec_project.md) §3 success criteria, headline reporting must include **Pass@1 and Pass@8** for direct comparability with SPA Table 2.
 
 **Done:** `evaluate_rl.py` now supports `--metric pass-at-k` via `evaluate_pass_at_k()` and `rollout_one()`.
 
@@ -383,7 +383,7 @@ python evaluate_rl.py \
 
 ### 5.3 SPA paper baselines — 🚧 not yet implemented
 
-Per [SPEC.md](SPEC.md) §3, the headline result must compare against:
+Per [spec_project.md](spec_project.md) §3, the headline result must compare against:
 
 1. **Vanilla RL** — base Qwen2.5-1.5B-Instruct + RL with task reward only, no world-model SFT, no termination tags. (Re-implement SPA's "Vanilla RL" row.)
 2. **State-Estimation-only RL** — SFT with `<observation>` tags only (no `<prediction>`, no termination tags), then RL. (SPA's "State Estimation RL" row.)
@@ -439,7 +439,7 @@ ssh autodl 'bash scripts/_run_with_env.sh python evaluate_rl.py ...'  # see §5.
 
 ## 7. Build queue (what's missing for the headline result)
 
-Ordered by load-bearing-ness for [SPEC.md](SPEC.md) §3 success criteria:
+Ordered by load-bearing-ness for [spec_project.md](spec_project.md) §3 success criteria:
 
 1. ~~**Pass@1 / Pass@8 mode in `evaluate_rl.py`**~~ — ✅ done. See §5.2.
 2. **Vanilla RL baseline run** — straightforward; existing `rl_trainer.py` with reward zeroed except task success.

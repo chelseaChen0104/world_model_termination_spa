@@ -137,6 +137,15 @@ class RLConfig:
     # calibration but Pass@1 doesn't lift. Composable: works alongside v6/v7/v8.
     action_quality_bonus: float = 0.0
 
+    # Baseline mode — for SPA-style ablations that don't have <solvable> tag.
+    # When True: skip solvable_reward entirely (zero contribution to per-step
+    # reward) AND drop <solvable> from the format-reward required-tag set.
+    # Used for vanilla RL, SE-only, and SPA-full baselines.
+    skip_solvable_reward: bool = False
+    # Drop <prediction> from format-reward required tags too. Used for SE-only
+    # baseline where the SFT model was trained without <prediction>.
+    skip_prediction_tag: bool = False
+
     # Eval / save
     eval_every: int = 50
     save_every: int = 100
@@ -156,12 +165,37 @@ class RLConfig:
     # can gate on.
     truncation_min_step: int = 0
 
+    # Eval-prompt fixes (2026-05-02). Default False = old behavior; True =
+    # match SFT distribution. Discovered that single-turn SFT data + multi-turn
+    # eval prompts caused B-H1 Pass@1=0% (the model collapsed to bare-answer
+    # output at turn 1+). May also affect Sudoku/Pentomino results.
+    #
+    # `prepend_current_state` wraps each user_msg with "Current state:\n{obs}"
+    # at step 0 and "Action executed. Current state:\n{obs}" at step 1+, matching
+    # SFTFormatter line 303 / 361 / 363 / 375 / 377.
+    #
+    # `single_turn_eval` resets the chat history per step — each turn is a
+    # fresh single-turn prompt (system + current user_msg), no prior turns.
+    # Matches single-turn SFT training distribution exactly.
+    prepend_current_state: bool = False
+    single_turn_eval: bool = False
+
 
 # ----------------------------------------------------------------------------
 # Reward helpers
 # ----------------------------------------------------------------------------
 
 REQUIRED_TAGS = ("<observation>", "<prediction>", "<solvable>", "<answer>")
+
+
+def required_tags_for(cfg) -> tuple:
+    """REQUIRED_TAGS, filtered to remove tags the baseline isn't trained to produce."""
+    drop = set()
+    if getattr(cfg, "skip_solvable_reward", False):
+        drop.add("<solvable>")
+    if getattr(cfg, "skip_prediction_tag", False):
+        drop.add("<prediction>")
+    return tuple(t for t in REQUIRED_TAGS if t not in drop)
 
 _re_solvable = re.compile(r"<solvable>\s*(true|false)\s*</solvable>", re.IGNORECASE)
 # Polyomino + future MKD use `<viability>` instead of `<solvable>`.
@@ -272,8 +306,8 @@ def parse_action(text: str) -> Optional[tuple]:
     return r - 1, c - 1, n
 
 
-def format_reward(text: str, per_tag: float) -> float:
-    return sum(per_tag for t in REQUIRED_TAGS if t.lower() in text.lower())
+def format_reward(text: str, per_tag: float, required_tags: tuple = REQUIRED_TAGS) -> float:
+    return sum(per_tag for t in required_tags if t.lower() in text.lower())
 
 
 def solvable_reward(pred: Optional[bool], gt: bool, cfg: RLConfig) -> float:
@@ -331,13 +365,30 @@ class Rollout:
 
 
 def build_prompt(tokenizer, system_prompt: str, history: list, current_user_msg: str) -> str:
-    """Render the chat prompt up to and including <|im_start|>assistant\\n."""
+    """Render the chat prompt up to and including <|im_start|>assistant\\n.
+
+    NOTE: `history` is honored unconditionally here. To run single-turn eval
+    (matching single-turn SFT distribution), the caller should pass an empty
+    history each step. See `do_rollout` / `do_rollouts_batched` for the
+    `cfg.single_turn_eval` flag.
+    """
     msgs = [{"role": "system", "content": system_prompt}]
     for u, a in history:
         msgs.append({"role": "user", "content": u})
         msgs.append({"role": "assistant", "content": a})
     msgs.append({"role": "user", "content": current_user_msg})
     return tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+
+
+def wrap_user_msg(obs: str, step_idx: int, cfg) -> str:
+    """If cfg.prepend_current_state, wrap obs to match SFTFormatter user-msg
+    format: 'Current state:\\n{obs}' at step 0; 'Action executed. Current
+    state:\\n{obs}' at step 1+. Otherwise return obs unchanged."""
+    if not getattr(cfg, "prepend_current_state", False):
+        return obs
+    if step_idx == 0:
+        return f"Current state:\n{obs}"
+    return f"Action executed. Current state:\n{obs}"
 
 
 @torch.no_grad()
@@ -389,16 +440,20 @@ def do_rollout(
     is_solved = False
 
     for t in range(cfg.max_rollout_steps):
-        prompt_text = build_prompt(tokenizer, system_prompt, history, obs)
+        user_msg = wrap_user_msg(obs, t, cfg)
+        eval_history = [] if cfg.single_turn_eval else history
+        prompt_text = build_prompt(tokenizer, system_prompt, eval_history, user_msg)
         response_text, response_ids, old_logps = sample_response(model, tokenizer, prompt_text, cfg, device)
 
         pred = parse_solvable(response_text)
         action = parse_action(response_text)
-        fmt_r = format_reward(response_text, cfg.format_per_tag)
+        _req_tags = required_tags_for(cfg)
+        fmt_r = format_reward(response_text, cfg.format_per_tag, _req_tags)
 
         if action is None:
             # Unparseable action — give worst-case step reward and stop.
-            calib_r = cfg.fn_reward
+            # In baseline mode (no <solvable>), bypass calib penalty too.
+            calib_r = 0.0 if cfg.skip_solvable_reward else cfg.fn_reward
             via_pos = find_viability_token_positions(tokenizer, response_ids)
             steps.append(StepRecord(
                 prompt_text=prompt_text, response_text=response_text, response_ids=response_ids,
@@ -416,7 +471,7 @@ def do_rollout(
         gt_solvable = bool(info.get("is_solvable", True))
         is_bp = bool(info.get("is_breaking_point", False))
         is_solved = bool(info.get("success", False))
-        calib_r = solvable_reward(pred, gt_solvable, cfg)
+        calib_r = 0.0 if cfg.skip_solvable_reward else solvable_reward(pred, gt_solvable, cfg)
         progress_r = cfg.progress_bonus_per_step  # valid action that advanced trajectory
         action_q_r = cfg.action_quality_bonus * (1.0 if gt_solvable else -1.0)
         via_pos = find_viability_token_positions(tokenizer, response_ids)
@@ -479,6 +534,11 @@ def _build_env_factory(env_template):
             board_h=env_template.board_h,
             board_w=env_template.board_w,
             piece_set=env_template.initial_pieces,
+            max_steps=env_template.max_steps,
+        )
+    if cls.__name__ == "HidatoEnv":
+        return lambda: cls(
+            puzzle_bank=env_template.puzzle_bank,
             max_steps=env_template.max_steps,
         )
     raise ValueError(f"unknown env class: {cls.__name__}")
@@ -584,7 +644,11 @@ def do_rollouts_batched(
 
         # Build prompts for all alive rollouts
         prompts = [
-            build_prompt(tokenizer, system_prompt, rollouts_state[i]["history"], rollouts_state[i]["obs"])
+            build_prompt(
+                tokenizer, system_prompt,
+                [] if cfg.single_turn_eval else rollouts_state[i]["history"],
+                wrap_user_msg(rollouts_state[i]["obs"], len(rollouts_state[i]["steps"]), cfg),
+            )
             for i in alive_indices
         ]
 
@@ -597,14 +661,15 @@ def do_rollouts_batched(
             prompt_text = prompts[slot_idx]
 
             pred = parse_solvable(text)
-            fmt_r = format_reward(text, cfg.format_per_tag)
+            _req_tags = required_tags_for(cfg)
+            fmt_r = format_reward(text, cfg.format_per_tag, _req_tags)
             action_str = _extract_answer(text)
             env_i = r["env"]
 
             # Pass the raw <answer> string to env.step — each env parses its own action format.
             # If extraction failed (no <answer> tag), fall back to a sentinel that the env will reject.
             if not action_str:
-                calib_r = cfg.fn_reward
+                calib_r = 0.0 if cfg.skip_solvable_reward else cfg.fn_reward
                 via_pos = find_viability_token_positions(tokenizer, response_ids)
                 r["steps"].append(StepRecord(
                     prompt_text=prompt_text, response_text=text, response_ids=response_ids,
@@ -622,7 +687,10 @@ def do_rollouts_batched(
             gt_solvable = bool(info.get("is_solvable", True))
             is_bp = bool(info.get("is_breaking_point", False))
             is_solved = bool(info.get("success", False))
-            calib_r = solvable_reward(pred, gt_solvable, cfg) if action_was_valid else cfg.fn_reward
+            if cfg.skip_solvable_reward:
+                calib_r = 0.0
+            else:
+                calib_r = solvable_reward(pred, gt_solvable, cfg) if action_was_valid else cfg.fn_reward
             progress_r = cfg.progress_bonus_per_step if action_was_valid else 0.0
             action_q_r = (cfg.action_quality_bonus * (1.0 if gt_solvable else -1.0)
                           if action_was_valid else 0.0)
@@ -1034,7 +1102,7 @@ def quick_pass1(policy, tokenizer, env, system_prompt: str, cfg: RLConfig, devic
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--env", default="sudoku", choices=["sudoku", "polyomino"],
+    p.add_argument("--env", default="sudoku", choices=["sudoku", "polyomino", "hidato"],
                    help="Which env to train against")
     p.add_argument("--sft-checkpoint", required=True)
     p.add_argument("--output-dir", default="outputs/rl_b5_phase1")
@@ -1089,6 +1157,34 @@ def main():
                         "gate after rollout has accumulated this many steps. "
                         "Set to 3+ to avoid killing rollouts at step 1-2 when "
                         "model has less context. Default 0 (gate fires anytime).")
+    p.add_argument("--skip-solvable-reward", action="store_true", default=False,
+                   help="Baseline mode (vanilla / SE-only / SPA-full): skip "
+                        "the <solvable>-tag calibration reward AND drop "
+                        "<solvable> from format-reward required tags. "
+                        "Use for SPA Table 5-style baselines that don't have "
+                        "the termination tag.")
+    p.add_argument("--skip-prediction-tag", action="store_true", default=False,
+                   help="Baseline mode (SE-only): also drop <prediction> from "
+                        "format-reward required tags, since the SE-only SFT "
+                        "model is trained to produce <observation> + <answer> only.")
+    p.add_argument("--prepend-current-state", action="store_true", default=False,
+                   help="Wrap each user msg with 'Current state:\\n{obs}' "
+                        "(step 0) or 'Action executed. Current state:\\n{obs}' "
+                        "(step 1+) to match SFTFormatter format. Discovered as "
+                        "necessary for B-H1 (Hidato) — without it the model "
+                        "collapses to bare-answer mode at turn 1+.")
+    p.add_argument("--single-turn-eval", action="store_true", default=False,
+                   help="Reset chat history per step at eval/rollout time. "
+                        "Each turn becomes a fresh single-turn prompt matching "
+                        "the single-turn SFT training distribution. Use for "
+                        "envs where the model collapses to bare-answer mode at "
+                        "turn 1+ under multi-turn history (e.g., B-H1 Hidato).")
+    p.add_argument("--max-response-tokens", type=int, default=None,
+                   help="Override the default per-response token budget at "
+                        "rollout time. Default 256. Increase to 512+ for envs "
+                        "with verbose responses (Hidato emits long XML with "
+                        "rules + 'Already placed' + 'Last action' lines that "
+                        "easily exceed 256 tokens).")
     args = p.parse_args()
 
     cfg = RLConfig(
@@ -1105,7 +1201,13 @@ def main():
         eval_every=args.eval_every,
         reward_version=args.reward_version,
         class_balance_cap=args.class_balance_cap,
+        skip_solvable_reward=args.skip_solvable_reward,
+        skip_prediction_tag=args.skip_prediction_tag,
+        prepend_current_state=args.prepend_current_state,
+        single_turn_eval=args.single_turn_eval,
     )
+    if args.max_response_tokens is not None:
+        cfg.max_response_tokens = args.max_response_tokens
 
     # Apply v7/v8 reward defaults (per module docstring).
     # v7: symmetric magnitudes + class balance + progress bonus.
@@ -1201,6 +1303,10 @@ def main():
             piece_set=piece_set, max_steps=cfg.max_rollout_steps,
         )
         formatter = SFTFormatter(variant="polyomino_minimal")
+    elif args.env == "hidato":
+        from src.environments.hidato import HidatoEnv
+        env = HidatoEnv(max_steps=cfg.max_rollout_steps)
+        formatter = SFTFormatter(variant="hidato_minimal")
     else:
         env = SudokuEnv(grid_size=cfg.grid_size, difficulty=cfg.difficulty, max_steps=cfg.max_rollout_steps)
         formatter = SFTFormatter(variant="sudoku_minimal")

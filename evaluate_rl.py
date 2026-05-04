@@ -142,7 +142,7 @@ def evaluate_solvable_logprob(model, tokenizer, eval_samples, system_prompt, mod
 
     Args:
         tag_name: Which XML tag to probe at. Defaults to "solvable" for Sudoku
-            backward-compat. Use "viability" for Polyomino (per spec_2026-04-29_pentomino.md §4).
+            backward-compat. Use "viability" for Polyomino (per spec_pentomino.md §4).
 
     For each sample:
       1. Build prompt = chat_template([system, user_state])

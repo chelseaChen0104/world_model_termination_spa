@@ -186,9 +186,9 @@ python3 scripts/combine_4x4_spa_scale_parts.py
 rsync -avz data/sudoku_4x4_llm_policy_minimal_spa_scale/ \
   autodl2:/root/autodl-tmp/world_model_termination_spa/data/sudoku_4x4_llm_policy_minimal_spa_scale/
 
-# B-5 SFT + eval (uses scripts/run_b5_4x4_spa_hparams.sh)
+# B-5 SFT + eval (uses scripts/run_sudoku_4x4_sft.sh)
 ssh autodl2 'cd /root/autodl-tmp/world_model_termination_spa && \
-             bash scripts/run_b5_4x4_spa_hparams.sh'
+             bash scripts/run_sudoku_4x4_sft.sh'
 ```
 
 Logs: [logs/sft_b5.log](../logs/sft_b5.log), [logs/eval_b5.log](../logs/eval_b5.log).

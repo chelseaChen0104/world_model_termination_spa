@@ -1,6 +1,6 @@
 """Polyomino (pentomino) tiling environment for termination prediction.
 
-Implements the env API laid out in doc/spec_2026-04-29_pentomino.md.
+Implements the env API laid out in doc/spec_pentomino.md.
 
 State: 2D board (chars) + remaining pieces.
 Action: "place {piece} ori={K} at row {R} col {C}" — anchor lands at (R-1, C-1).

@@ -1,28 +1,32 @@
 #!/bin/bash
-# Phase 3 RL on Sudoku 4×4: continue from Run A's endpoint with v8 viability-tag KL anchor.
+# Phase 3 v8.2 RL on Sudoku 4×4: same recipe as Phase 3 v8, but with the
+# dual-token anchor enabled (`--dual-token-anchor`). Anchors logp(>true) AND
+# logp(>false) at every viability position regardless of which was sampled.
 #
-# Run A (lr=1e-5, 500 steps, v6.1 reward) lifted Pass@1 from 6.67% → 33.33% but
-# `solvable_acc` drifted from 0.62 → 0.51 (calibration regression). bp_recall stayed
-# at 1.000 throughout. See doc/runs_ledger_2026-04-29.md for full eval trajectory.
+# Why v8.2 (after min-step sweep, 2026-05-01):
+#   v8 single-token anchor causes bimodal confidence — at any state the model
+#   is either very confident True or very confident False. The τ-sweep
+#   confirmed this (τ ∈ {0.95..0.9999} all gave identical 55%/22% truncation
+#   behavior). The min-step sweep then rejected the "premature in-training
+#   kill" hypothesis (per-batch solve rate flat across min_step 0..4). The
+#   remaining hypotheses for the −10pp eval Pass@1 cost:
+#     1. eval-time gate fires too eagerly on borderline rollouts that would
+#        recover in eval (where rollouts are uncapped)
+#     2. solvable_acc calibration is corrupted by drifting unsampled-token logp
+#     3. τ has no fine control because the bimodal mass is anchor-induced
+#   v8.2 directly addresses (2) and (3) by anchoring both tokens; (1) follows
+#   if the bimodality flattens.
 #
-# Phase 3 hypothesis: applying v8's <solvable>-tag KL anchor (coef 0.5) on top of
-# Run A's checkpoint should restore calibration to ~0.95 (matching B-5 SFT) WITHOUT
-# losing the Pass@1 gains. This validates the anchor on a known-working setup,
-# decoupled from Pentomino's "Pass@1 stuck at 0%" confound.
-#
-# Usage:
-#   bash scripts/run_rl_b5_phase3_v8.sh              # default: 200 steps from Run A's final
-#   N_TOTAL_STEPS=300 bash scripts/run_rl_b5_phase3_v8.sh
-#
-# Default: 200 steps × 4 puzzles × 8 rollouts = 32 rollouts/step at lr=1e-5
-# Wall time on H800: ~3-4 hours
+# Starting checkpoint: same as Phase 3 v8 (outputs/rl_b5_phase2_continue/final).
+# Output:              outputs/rl_b5_phase3_v8_2_dual_anchor
+# Wall time on H800:   similar to v8, ~3-4 hr for 200 steps.
 
 set -e
 cd /root/autodl-tmp/world_model_termination_spa
 
 N_TOTAL_STEPS=${N_TOTAL_STEPS:-200}
 SFT_PATH=${SFT_PATH:-outputs/rl_b5_phase2_continue/final}
-OUTPUT_DIR=${OUTPUT_DIR:-outputs/rl_b5_phase3_v8_anchor}
+OUTPUT_DIR=${OUTPUT_DIR:-outputs/rl_b5_phase3_v8_2_dual_anchor}
 N_PUZZLES_PER_BATCH=${N_PUZZLES_PER_BATCH:-4}
 GROUP_SIZE=${GROUP_SIZE:-8}
 LR=${LR:-1e-5}
@@ -35,11 +39,11 @@ CLASS_BALANCE_CAP=${CLASS_BALANCE_CAP:-5.0}
 VIABILITY_KL_COEF=${VIABILITY_KL_COEF:-0.5}
 
 mkdir -p "$OUTPUT_DIR"
-LOG=logs/rl_b5_phase3_v8.log
+LOG=logs/rl_b5_phase3_v8_2.log
 > "$LOG"
 
 echo "============================================================"
-echo "  RL Phase 3 ($REWARD_VERSION) — Sudoku 4×4, anchor on Run A"
+echo "  RL Phase 3 v8.2 — Sudoku 4×4, dual-token anchor on Run A"
 echo "============================================================"
 echo "  SFT checkpoint:    $SFT_PATH  (= Run A endpoint, Pass@1 ~33%)"
 echo "  Output dir:        $OUTPUT_DIR"
@@ -50,10 +54,11 @@ echo "  Group size:        $GROUP_SIZE  (rollouts/puzzle)"
 echo "  Effective batch:   $((N_PUZZLES_PER_BATCH * GROUP_SIZE)) rollouts/step"
 echo "  Learning rate:     $LR"
 echo "  KL coefficient:    $KL_COEF"
-echo "  Reward version:    $REWARD_VERSION (= v7 + viability/solvable-tag KL anchor)"
+echo "  Reward version:    $REWARD_VERSION + dual-token anchor"
 echo "  Progress bonus:    $PROGRESS_BONUS per valid step"
 echo "  Class-balance cap: $CLASS_BALANCE_CAP"
-echo "  Viability KL coef: $VIABILITY_KL_COEF (locks <solvable> calibration)"
+echo "  Viability KL coef: $VIABILITY_KL_COEF"
+echo "  v8.2 dual anchor:  ENABLED (anchors logp(>true) AND logp(>false))"
 echo "  Eval every:        $EVAL_EVERY steps (Pass@1 greedy on 30 puzzles)"
 echo "============================================================"
 
@@ -74,10 +79,11 @@ bash scripts/_run_with_env.sh python -u src/training/rl_trainer_v6.py \
     --progress-bonus "$PROGRESS_BONUS" \
     --class-balance-cap "$CLASS_BALANCE_CAP" \
     --viability-kl-coef "$VIABILITY_KL_COEF" \
+    --dual-token-anchor \
     2>&1 | tee "$LOG"
 
 echo
-echo "=== Phase 3 done ==="
+echo "=== Phase 3 v8.2 done ==="
 echo "Logs:        $LOG"
 echo "Checkpoints: $OUTPUT_DIR/"
 echo "Per-step JSONL: $OUTPUT_DIR/rl_log.jsonl"
