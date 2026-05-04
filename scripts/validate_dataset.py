@@ -218,11 +218,13 @@ def validate_record_env_specific(rec: Dict[str, Any], idx: int) -> List[str]:
             if asn and not (1 <= asn.get("value", 0) <= 4):
                 violations.append(f"[{idx}.{ci}] sudoku action.value={asn['value']} not in [1,4]")
 
-    elif env == "pentomino5x4":
+    elif env in ("pentomino5x4", "pentomino5x6"):
+        # env field encodes the board shape; use it to set expected dims
+        exp_h, exp_w = (5, 4) if env == "pentomino5x4" else (5, 6)
         board = state_struct.get("board")
         rem = state_struct.get("remaining_pieces")
-        if not isinstance(board, list) or len(board) != 5 or any(len(row) != 4 for row in board):
-            violations.append(f"[{idx}] pentomino state_struct.board is not 5x4")
+        if not isinstance(board, list) or len(board) != exp_h or any(len(row) != exp_w for row in board):
+            violations.append(f"[{idx}] pentomino state_struct.board is not {exp_h}x{exp_w}")
         if not isinstance(rem, list):
             violations.append(f"[{idx}] pentomino state_struct.remaining_pieces is not list: {rem!r}")
         # Cells must be '.' or piece letter

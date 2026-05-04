@@ -1,10 +1,12 @@
-# SAVE Data Generation Spec — Pentomino 5×4 LPWY
+# SAVE Data Generation Spec — Pentomino 5×6
 
 **Schema version**: save_sibling_set_v1.2 (shared with Sudoku)
-**Target**: Generate sibling-set training/eval data for SAVE on Pentomino tiling, 5×4 board with piece set {L, P, W, Y}.
-**Last updated**: 2026-05-04
+**Target**: Generate sibling-set training/eval data for SAVE on Pentomino tiling, **5×6 board with 6-piece subsets** (172 valid configurations from the 12 free pentominoes).
+**Last updated**: 2026-05-04 (migrated from 5×4 LPWY to 5×6 multi-subset)
 
 > **This doc inherits structure and constraints from [data_generation_sudoku.md](data_generation_sudoku.md).** Sections that are unchanged for Pentomino reference the Sudoku doc by section number rather than restate it. Pentomino-specific deviations are spelled out below.
+
+> **2026-05-04 migration note**: this project moved off the 5×4 LPWY single-subset setup. Reasons: (1) ~3500 reachable states cap → records-per-state ratio ≥ 8 at toy and ≥ 16 at paper-final, hard memorization risk; (2) only 4 trajectory steps gave too few boundary states for the deceptive-pair signal; (3) one root puzzle limited diversity. The 5×6 6-piece setup gives 172 distinct starting subsets, 6 trajectory steps each, ~30K reachable states across all subsets. Legacy 5×4 code is in git history (commits before `<5x6 migration commit>`) but not used going forward.
 
 ## Three-stage scaling roadmap
 
@@ -14,15 +16,18 @@
 | **Pilot** | 3000 / 1000 / 1000 | Paper trend validation | Viability AUC differentiates by model size + SAVE ≥ score baseline on deceptive subset |
 | **Paper-final** | 8000 / 1500 / 1500 | Stable submission numbers | Paper claims hold; numbers stable across reseeded runs |
 
-Pentomino-specific scaling caveat: at 5×4 LPWY only ~3500 reachable states exist in the search tree. Records-per-state ratios at each stage:
-- Toy 2500 / ~300 unique states ≈ 8 (acceptable)
-- Pilot 5000 / ~500 unique states ≈ 10 (high but OK)
-- Paper-final 11000 / ~700 unique states ≈ 16 (memorization risk)
+5×6 records-per-state ratio at each stage (estimated from 172 subsets × ~30 reachable boundary states/subset ≈ 5000 unique states pool):
+- Toy 2500 / ~1500 unique boundary states ≈ 1.7 (excellent)
+- Pilot 5000 / ~3000 unique boundary states ≈ 1.7 (excellent)
+- Paper-final 11000 / ~5000 unique boundary states ≈ 2.2 (good)
 
-If paper-final ratio becomes a problem, expansion paths (in priority order):
-1. Pre-placed-piece variants (1-piece-given starting states) → ~160 distinct roots, no retraining needed
-2. Train a multi-piece-set generalist π_θ (5×4, all 26 valid 4-piece subsets) → ~1-2 days SFT+RL
-3. Move to 5×6 with 6-piece subsets (172 valid configurations) → requires generalist π_θ retraining
+This is much healthier than the 5×4 setup and is the primary motivation for the migration.
+
+### π_θ SFT data scale
+
+A new Pentomino π_θ at 5×6 must be SFT-trained before SAVE data gen can run. Target: **~10K (state, action) samples** spanning all 172 subsets and 6 step indices.
+
+Generated 2026-05-04: `data/pentomino5x6/pi_theta_sft/` — 6636 train + 732 val = 7368 samples (172 subsets, max 10 tilings/subset, 6 steps/tiling). Subset distribution: min 12, max 60, avg 38.6 samples per subset; steps perfectly balanced 1106 each. To reach exactly 10K, raise `--max-tilings-per-subset` (some subsets cap before reaching 10 due to fewer distinct tilings).
 
 ---
 
@@ -46,7 +51,7 @@ Identical to Sudoku §2, with three Pentomino-specific field meanings:
 
 | Field | Pentomino value |
 |---|---|
-| `env` | `"pentomino5x4"` (was `"sudoku4"`) |
+| `env` | `"pentomino5x6"` (was `"sudoku4"`) |
 | `state.state_text_version` | `"pentomino_text_b8_v1"` (B-8 board format MINUS the doom-suffix leak) |
 | `state.state_struct` | `{"board": [[".",".",".",".",...]], "remaining_pieces": ["L","P","W","Y"]}` |
 | `candidates[].action_struct` | `{"piece": "L", "ori": 0, "row": 1, "col": 1}` (1-indexed row/col) |
@@ -194,7 +199,9 @@ Leakage can also occur at **state level** (two different trajectories visiting t
 
 ---
 
-## 5. Pentomino 5×4 Environment Spec
+## 5. Pentomino 5×6 Environment Spec
+
+> **Note**: subsections below were originally written for the single-subset 5×4 LPWY setup. State examples still show LPWY for clarity but the actual generated data uses 6-piece subsets at 5×6. Where field shapes differ (e.g., `board` is 5×6 not 5×4, `remaining_pieces` is one of 172 6-piece subsets), the schema is identical — only dimensions and piece set vary per record.
 
 ### 5.1 State and action representation
 
@@ -257,11 +264,11 @@ Schema `progress.formula_id`: `"pentomino_local_progress_v1"`.
 
 ### 5.3 Solver interface
 
-`PentominoSolver(board_h=5, board_w=4)` — see [scripts/pentomino5x4_solver.py](../scripts/pentomino5x4_solver.py).
+`PentominoSolver(board_h=5, board_w=4)` — see [scripts/pentomino_solver.py](../scripts/pentomino_solver.py).
 
 ```python
 class PentominoSolver:
-    version = "pentomino5x4_solver_v1"
+    version = "pentomino_solver_v2"
     
     def solve(self, board, remaining_pieces) -> SolverResult:
         # Returns: solvable, num_solutions, nodes, backtracks,
@@ -383,15 +390,15 @@ data/
 scripts/
   generate_save_data.py               # SHARED: parameterized by --env
   validate_dataset.py                 # SHARED
-  pentomino5x4_solver.py              # ✅ done
-  pentomino5x4_env.py                 # ✅ done
-  progress_pentomino5x4.py            # TBW
+  pentomino_solver.py              # ✅ done
+  pentomino_env.py                 # ✅ done
+  progress_pentomino.py            # TBW
   policy_sampler.py                   # SHARED: HF wrapper for lt/ht + logprob eval
   save_schema.py                      # SHARED: Pydantic models
   sanity_check_rl_b5_under_corrected_prompt.py  # SHARED: parameterizable to --env polyomino
 ```
 
-`metadata.json` follows Sudoku §8 with `env: "pentomino5x4"`, `policy_model: "outputs/rl_pentomino_5x4_no_leak_v8_aq/final"`.
+`metadata.json` follows Sudoku §8 with `env: "pentomino5x6"`, `policy_model: "outputs/rl_pentomino_5x4_no_leak_v8_aq/final"`.
 
 ---
 
@@ -410,10 +417,10 @@ python scripts/generate_save_data.py \
     --env polyomino \
     --role train_balanced \
     --n_target 30 \
-    --output data/pentomino5x4/smoke_test.jsonl \
+    --output data/pentomino5x6/smoke_test.jsonl \
     --policy_model outputs/rl_pentomino_5x4_no_leak_v8_aq/final \
     --seed 42
-python scripts/validate_dataset.py data/pentomino5x4/smoke_test.jsonl
+python scripts/validate_dataset.py data/pentomino5x6/smoke_test.jsonl
 ```
 
 Inspect manually per Sudoku §10. Pentomino-specific checks:

@@ -1,19 +1,16 @@
-"""Generate base-policy SFT data for Pentomino 5×4 (multi-piece-set).
+"""Generate base-policy SFT data for Pentomino 5×6 (multi-piece-set).
 
 Schema: pi_theta_sft_v1 (the spec for training a non-OOD π_θ).
 
 Strategy:
-  1. Enumerate all 26 valid 4-piece subsets that tile 5×4 (per
-     scripts/pentomino5x4_solver.py — solver returns up to solution_cap
-     tilings per subset).
-  2. For each subset, find up to solution_cap=20 distinct tilings.
+  1. Enumerate all valid k-piece subsets that tile the (h, w) board.
+     Default 5×6 with k=6 → 172 valid subsets.
+  2. For each subset, find up to `max_tilings_per_subset` distinct tilings.
   3. For each tiling, walk the solution path step-by-step. At each step,
      emit one (state, action) sample:
        prompt = render(board, remaining_pieces)
        response = "place {piece} ori={K} at row {R} col {C}"
-  4. Optionally augment with partial-state-start samples (currently OFF —
-     full-empty-board paths give enough samples at 5×4 with multi-subset).
-  5. Split at (subset, tiling) level for leakage prevention: 90% train, 10% val.
+  4. Split at (subset, tiling) level for leakage prevention: 90% train, 10% val.
 
 Output format: pi_theta_sft_v1 schema — JSONL with {prompt, response, metadata}.
 
@@ -21,11 +18,12 @@ Plain action response format (NO XML, NO viability tag) per user directive
 2026-05-04: π_θ has one job (pick actions). The viability prediction is f_φ's
 job, separately. See doc/SAVE_handoff.md §3 + the SFT spec discussion.
 
-Usage:
+Usage (5×6 default, ~172 subsets × 10 tilings × 6 steps ≈ 10K samples):
   python scripts/generate_pi_theta_sft_pentomino.py \\
-      --board-h 5 --board-w 4 \\
-      --output-dir data/pentomino5x4/pi_theta_sft \\
-      --max-tilings-per-subset 20 \\
+      --board-h 5 --board-w 6 \\
+      --k-pieces 6 \\
+      --output-dir data/pentomino5x6/pi_theta_sft \\
+      --max-tilings-per-subset 10 \\
       --val-fraction 0.1 \\
       --seed 42
 """
@@ -48,8 +46,8 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from src.environments.polyomino_utils import ALL_PIECES, placement_cells
-from scripts.pentomino5x4_solver import PentominoSolver
-from scripts.pentomino5x4_env import (
+from scripts.pentomino_solver import PentominoSolver
+from scripts.pentomino_env import (
     ActionStruct, render_state_b8, action_text, action_hash,
 )
 
@@ -238,11 +236,11 @@ def split_train_val(all_samples: List[dict], val_fraction: float, rng: random.Ra
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--board-h", type=int, default=5)
-    p.add_argument("--board-w", type=int, default=4)
-    p.add_argument("--k-pieces", type=int, default=4,
+    p.add_argument("--board-w", type=int, default=6)
+    p.add_argument("--k-pieces", type=int, default=6,
                    help="Number of pieces per subset (must equal H*W/5)")
-    p.add_argument("--max-tilings-per-subset", type=int, default=20)
-    p.add_argument("--output-dir", default="data/pentomino5x4/pi_theta_sft")
+    p.add_argument("--max-tilings-per-subset", type=int, default=10)
+    p.add_argument("--output-dir", default="data/pentomino5x6/pi_theta_sft")
     p.add_argument("--val-fraction", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-train-samples", type=int, default=None,
@@ -337,7 +335,7 @@ def main():
         "seed": args.seed,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "git_commit": git_commit,
-        "solver_version": "pentomino5x4_solver_v1",
+        "solver_version": "pentomino_solver_v2",
         "system_prompt": SYSTEM_PROMPT,
     }
     with open(metadata_path, "w") as f:

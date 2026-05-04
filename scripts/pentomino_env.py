@@ -1,10 +1,14 @@
-"""SAVE-side Pentomino 5×4 environment helpers.
+"""SAVE-side Pentomino environment helpers (board-size agnostic).
 
 Wraps state/action utilities for the SAVE data generator. Reuses
 PIECE_ORIENTATIONS and placement_cells from polyomino_utils WITHOUT
 modifying it. Render format is the B-8/no-leak format used at training:
 no "Last action: ... — board now unsolvable (...)" suffix. The doom-suffix
 data leak that affected B-7/B-8 RL is explicitly avoided here.
+
+Current target is **5×6 with 6-piece subsets** (172 valid configurations).
+Functions are board-size agnostic; pass `(board, remaining_pieces)` and
+the dimensions are derived from `len(board)` / `len(board[0])`.
 
 Public surface:
     render_state_b8(board, remaining_pieces)        -> string (no Last action line)
@@ -16,7 +20,7 @@ Public surface:
     is_goal(board)                                   -> bool
     enumerate_legal_actions(board, remaining_pieces) -> list[ActionStruct]
     state_hash(board)                                -> "sha1:..."
-    get_root_puzzle()                                -> (board, remaining_pieces)
+    empty_board(h, w)                                -> List[List[str]]
 """
 from __future__ import annotations
 
@@ -37,10 +41,7 @@ from src.environments.polyomino_utils import (
 )
 
 
-BOARD_H = 5
-BOARD_W = 4
-PIECE_SET = ("L", "P", "W", "Y")
-ENV_VERSION = "pentomino5x4_env_v1_LPWY"
+ENV_VERSION = "pentomino_env_v2"
 TEXT_VERSION = "pentomino_text_b8_v1"  # B-8 board format minus the doom-suffix
 
 
@@ -202,34 +203,30 @@ def state_hash(board: List[List[str]], remaining_pieces: List[str]) -> str:
     return "sha1:" + hashlib.sha1(canonical.encode()).hexdigest()
 
 
-def get_root_puzzle() -> Tuple[List[List[str]], List[str]]:
-    """The single canonical 5×4 LPWY puzzle: empty board, all 4 pieces remaining.
-
-    Per the existing project setup, Pentomino has ONE root puzzle (unlike Sudoku
-    which generates many). Diversity comes from sampling different action sequences
-    along the (4-step) trajectory rather than from different starting boards.
-    """
-    return [["."] * BOARD_W for _ in range(BOARD_H)], list(PIECE_SET)
+def empty_board(h: int, w: int) -> List[List[str]]:
+    """Helper: an empty H×W board with all cells '.'."""
+    return [["."] * w for _ in range(h)]
 
 
 # --- Smoke test ---
 
 def _smoke():
-    # 1) Initial render: matches B-8 format minus doom-suffix
-    board, remaining = get_root_puzzle()
+    # 1) Initial render of empty 5×6 with FILNPT (one of the 172 valid 6-piece subsets)
+    board = empty_board(5, 6)
+    remaining = ["F", "I", "L", "N", "P", "T"]
     rendered = render_state_b8(board, remaining)
     expected_lines = [
-        "Current board (5x4):",
-        ". . . .",
-        ". . . .",
-        ". . . .",
-        ". . . .",
-        ". . . .",
+        "Current board (5x6):",
+        ". . . . . .",
+        ". . . . . .",
+        ". . . . . .",
+        ". . . . . .",
+        ". . . . . .",
         "",
-        "Remaining pieces: L, P, W, Y",
+        "Remaining pieces: F, I, L, N, P, T",
     ]
     assert rendered == "\n".join(expected_lines), f"\nGOT:\n{rendered}"
-    print("  [1] empty 5×4 LPWY render matches expected format (no doom-suffix line)")
+    print("  [1] empty 5×6 FILNPT render matches expected format")
 
     # 2) parse_action_text round-trip
     a = ActionStruct(piece="L", ori=0, row=1, col=1)
@@ -238,8 +235,6 @@ def _smoke():
     assert parsed == a, f"got {parsed}, expected {a}"
     parsed2 = parse_action_text("place L ori=0 at row 1 column 1")
     assert parsed2 == a
-    bad = parse_action_text("place Z ori=0 at row 1 col 1")  # Z not in PIECE_ORIENTATIONS check
-    assert bad is None or bad.piece == "Z"  # Z is in PIECE_ORIENTATIONS — OK
     print(f"  [2] parse round-trip OK: '{txt}'")
 
     # 3) Canonical action + hash
@@ -253,13 +248,12 @@ def _smoke():
     new_board, new_remaining = apply_action(board, remaining, a)
     assert "L" not in new_remaining
     assert any(c == "L" for row in new_board for c in row)
-    # Original immutability
     assert all(c == "." for row in board for c in row)
     assert "L" in remaining
     print("  [4] is_local_valid + apply_action OK; input immutability preserved")
 
     # 5) Bad placement (out of bounds)
-    bad_action = ActionStruct(piece="L", ori=0, row=10, col=10)
+    bad_action = ActionStruct(piece="L", ori=0, row=20, col=20)
     assert not is_local_valid(board, remaining, bad_action)
     print("  [5] out-of-bounds placement rejected")
 
@@ -271,11 +265,11 @@ def _smoke():
     # 7) enumerate_legal_actions returns valid actions
     legal = enumerate_legal_actions(board, remaining)
     assert all(is_local_valid(board, remaining, a) for a in legal)
-    print(f"  [7] {len(legal)} legal actions on empty 5×4 LPWY")
+    print(f"  [7] {len(legal)} legal actions on empty 5×6 FILNPT")
 
     # 8) is_goal
     assert not is_goal(board)
-    full = [["L"] * BOARD_W for _ in range(BOARD_H)]
+    full = [["L"] * 6 for _ in range(5)]
     assert is_goal(full)
     print("  [8] is_goal OK")
 
@@ -284,15 +278,13 @@ def _smoke():
     h2 = state_hash(board, remaining)
     h3 = state_hash(new_board, new_remaining)
     assert h1 == h2 and h1 != h3
-    print(f"  [9] state_hash deterministic + distinguishes states")
+    print("  [9] state_hash deterministic + distinguishes states")
 
-    # 10) get_root_puzzle is canonical
-    b1, r1 = get_root_puzzle()
-    b2, r2 = get_root_puzzle()
-    assert b1 == b2 and r1 == r2
-    assert len(b1) == BOARD_H and len(b1[0]) == BOARD_W
-    assert tuple(r1) == PIECE_SET
-    print("  [10] get_root_puzzle deterministic, returns LPWY 5×4 empty")
+    # 10) Backward compat: 5×4 board still works
+    b4 = empty_board(5, 4)
+    rendered_4 = render_state_b8(b4, ["L", "P", "W", "Y"])
+    assert "Current board (5x4):" in rendered_4
+    print("  [10] legacy 5×4 board render still works")
 
     print("\nAll smoke tests passed.")
 

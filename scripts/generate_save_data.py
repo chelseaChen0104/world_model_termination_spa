@@ -112,10 +112,40 @@ def get_env_adapter(env_name: str):
         }
 
     elif env_name == "polyomino":
-        from scripts import pentomino5x4_env as env_mod
-        from scripts import pentomino5x4_solver as solver_mod
-        from scripts import progress_pentomino5x4 as progress_mod
-        solver = solver_mod.PentominoSolver(board_h=env_mod.BOARD_H, board_w=env_mod.BOARD_W)
+        from scripts import pentomino_env as env_mod
+        from scripts import pentomino_solver as solver_mod
+        from scripts import progress_pentomino as progress_mod
+        from src.environments.polyomino_utils import ALL_PIECES
+        import itertools, random as _random
+        # 5×6 with 6-piece subsets is the current target
+        _BOARD_H = int(os.environ.get("PENT_BOARD_H", "5"))
+        _BOARD_W = int(os.environ.get("PENT_BOARD_W", "6"))
+        _K_PIECES = (_BOARD_H * _BOARD_W) // 5
+        solver = solver_mod.PentominoSolver(board_h=_BOARD_H, board_w=_BOARD_W)
+
+        # Cache of valid k-piece subsets that tile the board (computed lazily).
+        _valid_subsets_cache: list = []
+        def _get_valid_subsets():
+            if _valid_subsets_cache:
+                return _valid_subsets_cache
+            cap1 = solver_mod.PentominoSolver(
+                board_h=_BOARD_H, board_w=_BOARD_W,
+                solution_cap=1, node_cap=200_000)
+            empty = env_mod.empty_board(_BOARD_H, _BOARD_W)
+            for combo in itertools.combinations(ALL_PIECES, _K_PIECES):
+                if cap1.solve(empty, list(combo)).solvable:
+                    _valid_subsets_cache.append(combo)
+            return _valid_subsets_cache
+
+        def _pentomino_root(seed: int, h: int, w: int, k_pieces: int) -> dict:
+            """Pick a random valid k-piece subset for the (h, w) board."""
+            subsets = _get_valid_subsets()
+            if not subsets:
+                raise RuntimeError(
+                    f"No valid {k_pieces}-piece subsets tile {h}×{w}")
+            rng = _random.Random(seed)
+            subset = list(rng.choice(subsets))
+            return {"board": env_mod.empty_board(h, w), "remaining_pieces": subset}
         AS = env_mod.ActionStruct
         SYS_PENT = (
             "You are solving a pentomino tiling puzzle. The board is a rectangular grid; "
@@ -149,7 +179,7 @@ def get_env_adapter(env_name: str):
             return {"board": new_state, "remaining_pieces": new_remaining}
 
         return {
-            "env_short": "pentomino5x4",
+            "env_short": f"pentomino{_BOARD_H}x{_BOARD_W}",
             "env_version": env_mod.ENV_VERSION,
             "state_text_version": env_mod.TEXT_VERSION,
             "system_prompt": SYS_PENT,
@@ -166,7 +196,7 @@ def get_env_adapter(env_name: str):
             "is_goal": lambda s: env_mod.is_goal(s["board"]),
             "enumerate_legal_actions": lambda s: env_mod.enumerate_legal_actions(s["board"], s["remaining_pieces"]),
             "state_hash": lambda s: env_mod.state_hash(s["board"], s["remaining_pieces"]),
-            "generate_root_puzzle": lambda seed, **kw: dict(zip(["board", "remaining_pieces"], env_mod.get_root_puzzle())),
+            "generate_root_puzzle": lambda seed, **kw: _pentomino_root(seed, _BOARD_H, _BOARD_W, kw.get("k_pieces", 6)),
             "solver": solver,
             "solver_version": solver_mod.SOLVER_VERSION,
             "solver_solve": lambda s: solver.solve(s["board"], s["remaining_pieces"]),

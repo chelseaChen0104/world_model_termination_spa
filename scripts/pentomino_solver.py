@@ -1,5 +1,9 @@
 """Instrumented Pentomino tiling solver for SAVE data generation.
 
+Board-size agnostic: caller passes `board_h` and `board_w` to the constructor.
+Used for 5×6 (current target — 6-piece subsets, 172 valid configs); also
+works for any other rectangular board where pentominoes can tile.
+
 Wraps `src.environments.polyomino_utils` PIECE_ORIENTATIONS + placement_cells
 + fits_on_board WITHOUT touching them (additivity). Implements its own
 backtracking search with instrumentation per `save_sibling_set_v1.2` schema:
@@ -29,7 +33,7 @@ from src.environments.polyomino_utils import (
 )
 
 
-SOLVER_VERSION = "pentomino5x4_solver_v1"
+SOLVER_VERSION = "pentomino_solver_v2"
 
 # A placement = (piece, ori_id, anchor_r, anchor_c) with row/col 0-indexed.
 Placement = Tuple[str, int, int, int]
@@ -215,49 +219,44 @@ class PentominoSolver:
 # --- Smoke test ---
 
 def _smoke():
-    s = PentominoSolver(board_h=5, board_w=4)
+    s = PentominoSolver(board_h=5, board_w=6)
 
-    # 1) Empty 5x4 board with LPWY: should be solvable with multiple tilings
-    empty = [['.'] * 4 for _ in range(5)]
-    r = s.solve(empty, ['L', 'P', 'W', 'Y'])
+    # 1) Empty 5x6 board with one of the 172 valid 6-piece subsets (FILNPT is one)
+    empty = [['.'] * 6 for _ in range(5)]
+    pieces = ['F', 'I', 'L', 'N', 'P', 'T']
+    r = s.solve(empty, pieces)
     assert r.solvable and r.num_solutions >= 1
-    assert r.solution_path is not None and len(r.solution_path) == 4
-    print(f"  [1] empty 5x4 LPWY: solvable={r.solvable}, n_sol={r.num_solutions}, "
+    assert r.solution_path is not None and len(r.solution_path) == 6
+    print(f"  [1] empty 5x6 {''.join(pieces)}: solvable={r.solvable}, n_sol={r.num_solutions}, "
           f"nodes={r.nodes}, depth={r.solution_depth}, t={r.solve_time_ms:.1f}ms")
-    print(f"      one solution: {r.solution_path}")
 
-    # 2) Verify the solution found tiles correctly
-    test_board = [['.'] * 4 for _ in range(5)]
+    # 2) Verify the solution tiles correctly
+    test_board = [['.'] * 6 for _ in range(5)]
     for piece, ori_id, ar, ac in r.solution_path:
         cells = placement_cells(piece, ori_id, ar, ac)
         for cr, cc in cells:
             assert test_board[cr][cc] == '.'
             test_board[cr][cc] = piece
     assert all(c != '.' for row in test_board for c in row)
-    print(f"  [2] solution tiles 5x4 board completely: ✓")
+    print(f"  [2] solution tiles 5x6 board completely: ✓")
 
-    # 3) Doomed: place P in upper-right corner first; this leaves an awkward gap.
-    #    Per our existing data sample, "place P ori=3 at row 1 col 3" leaves board unsolvable.
-    doomed_board = [row[:] for row in empty]
-    cells = placement_cells('P', 3, 0, 2)
-    if cells:
-        for cr, cc in cells:
-            doomed_board[cr][cc] = 'P'
-    r = s.solve(doomed_board, ['L', 'W', 'Y'])
-    print(f"  [3] P ori=3 at (0,2) then LWY: solvable={r.solvable}, "
-          f"nodes={r.nodes}, n_sol={r.num_solutions}")
-
-    # 4) Empty cells count mismatch → unsolvable cheap
-    bad = [['L', '.', '.', '.']] + [['.'] * 4 for _ in range(4)]
-    r = s.solve(bad, ['L', 'P', 'W', 'Y'])
+    # 3) Empty cells count mismatch → unsolvable cheap
+    bad = [['L', '.', '.', '.', '.', '.']] + [['.'] * 6 for _ in range(4)]
+    r = s.solve(bad, pieces)
     assert not r.solvable
-    print(f"  [4] area mismatch: solvable={r.solvable}, n_sol={r.num_solutions}")
+    print(f"  [3] area mismatch: solvable={r.solvable}, n_sol={r.num_solutions}")
 
-    # 5) is_viable + find_one_solution shortcuts
-    assert s.is_viable(empty, ['L', 'P', 'W', 'Y']) is True
-    sol = s.find_one_solution(empty, ['L', 'P', 'W', 'Y'])
-    assert sol is not None and len(sol) == 4
-    print(f"  [5] is_viable + find_one_solution OK")
+    # 4) is_viable + find_one_solution shortcuts
+    assert s.is_viable(empty, pieces) is True
+    sol = s.find_one_solution(empty, pieces)
+    assert sol is not None and len(sol) == 6
+    print(f"  [4] is_viable + find_one_solution OK")
+
+    # 5) Legacy 5×4 LPWY still works (backward compat)
+    s4 = PentominoSolver(board_h=5, board_w=4)
+    r = s4.solve([['.'] * 4 for _ in range(5)], ['L', 'P', 'W', 'Y'])
+    assert r.solvable and r.solution_path is not None and len(r.solution_path) == 4
+    print(f"  [5] legacy 5x4 LPWY: solvable={r.solvable}, depth={r.solution_depth}")
 
     print("\nAll smoke tests passed.")
 
