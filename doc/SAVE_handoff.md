@@ -1,9 +1,13 @@
-# SAVE SFT + RL Hand-off — Sudoku 4×4
+# SAVE SFT + RL Hand-off — Sudoku 4×4 (autodl2)
 
 > **Scope**: train the SAVE viability scorer **f_φ** for Sudoku 4×4 using the toy-stage data generated 2026-05-04. Downstream of that, optionally RL-tune f_φ. This doc is **Sudoku-only**; Pentomino + Hidato have their own pending hand-offs.
+>
+> **Cloud target**: **autodl2** (and only autodl2). All training, evaluation, and artifact storage for Sudoku f_φ happens on autodl2. Do not run Sudoku jobs on autodl or autodl3 — those are reserved for Hidato and Pentomino respectively.
+>
+> **Ownership (as of 2026-05-04)**: this hand-off is picked up by a dedicated local machine. The Pentomino/Hidato local machine should not initiate Sudoku training or sync artifacts to autodl2 unless re-scoped. Coordinate code edits via GitHub (`origin/main`) as the shared source of truth.
 
 **Last updated**: 2026-05-04
-**Status**: data ready, training not yet started.
+**Status**: data generated and validated (0 schema violations across all 3 roles on 2026-05-04); training not yet started.
 
 ---
 
@@ -284,21 +288,23 @@ If any fails: investigate before promoting toy → pilot.
 
 ## 10. Working with autodl2 from your local Mac
 
-Everything in this hand-off runs on **autodl2** (a remote GPU machine). You drive it from your laptop via SSH. Convention used in this project:
+Everything in this hand-off runs on **autodl2** (the dedicated Sudoku GPU machine — distinct from `autodl` for Hidato and `autodl3` for Pentomino/SAVE-misc). You drive it from your laptop via SSH.
 
 ### 10.1 SSH alias
 
-`~/.ssh/config` has an alias `autodl2` pointing at the cloud host:
+Add an alias `autodl2` to your `~/.ssh/config` (host/port may rotate as AutoDL re-leases the instance — confirm against the AutoDL console before first use). Reference values as of **2026-05-04**:
 
 ```
 Host autodl2
-    HostName connect.bjb1.seetacloud.com
-    Port 12158
+    HostName connect.westb.seetacloud.com
+    Port 18386
     User root
     IdentityFile ~/.ssh/id_ed25519_autodl
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
 ```
 
-Any local command works: `ssh autodl2 "..."`, `rsync ... autodl2:...`, `scp ... autodl2:...`.
+Any local command works: `ssh autodl2 "..."`, `rsync ... autodl2:...`, `scp ... autodl2:...`. If `ssh autodl2` fails with "Could not resolve hostname", check the AutoDL console — the instance may have been migrated and the HostName/Port need updating.
 
 ### 10.2 Standard paths on autodl2
 
@@ -320,12 +326,11 @@ Any local command works: `ssh autodl2 "..."`, `rsync ... autodl2:...`, `scp ... 
 #### A. Push a script edit to autodl2
 
 ```bash
-# After editing scripts/foo.py locally
-rsync -av /Users/yunboliu/Documents/Documents/Lbb/world_model_termination_spa/scripts/foo.py \
-    autodl2:/root/autodl-tmp/world_model_termination_spa/scripts/
+# After editing scripts/foo.py locally (run from the repo root)
+rsync -av scripts/foo.py autodl2:/root/autodl-tmp/world_model_termination_spa/scripts/
 ```
 
-Push only the file you changed. Don't `rsync` the whole tree — too slow and risks overwriting other work.
+Push only the file you changed. Don't `rsync` the whole tree — too slow and risks overwriting other work. **Always commit + push to GitHub first** so the change is durable and visible to any other local clients.
 
 #### B. Inspect a file or run a quick check
 
@@ -384,15 +389,17 @@ ssh autodl2 "pgrep -f 'simple_sft_trainer' | xargs -r kill"
 ssh autodl2 "tmux kill-session -t save_sft"
 ```
 
-### 10.4 Coordinating two local clients (laptop + desktop)
+### 10.4 Multi-client coordination (current ownership rule)
 
-If you work from two machines targeting the same autodl2:
+As of **2026-05-04**: a **single local machine owns autodl2 for Sudoku f_φ work**. The Pentomino/Hidato local machine should treat autodl2 as read-only — fine to inspect, do not push code or kick off jobs. If that arrangement changes, update this section.
+
+If two local clients ever need to share autodl2 (e.g., laptop + desktop on the same task):
 
 | Resource | Concurrent OK? |
 |---|---|
 | SSH connections, log tailing, status checks | ✅ Yes — one's a "monitor", other's the "executor" |
 | GPU training jobs (one at a time) | ⚠️ Run only ONE training/eval job on the GPU at a time. tmux makes this safe — both clients see the same session list |
-| Editing same script + rsync push | ❌ Avoid — last write wins; coordinate via git or designate one client as the editor |
+| Editing same script + rsync push | ❌ Avoid — last write wins; coordinate via GitHub (`pull`/`push`) and let only one client be the editor at a time |
 | `pip install` | ❌ Don't run from both at once |
 
 In practice: one client launches the SFT training in tmux; either client tails logs / attaches to the session for monitoring. Don't both kick off training jobs simultaneously.
