@@ -45,11 +45,92 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from src.environments.polyomino_utils import ALL_PIECES, placement_cells
+from src.environments.polyomino_utils import ALL_PIECES, PIECE_ORIENTATIONS, placement_cells
 from scripts.pentomino_solver import PentominoSolver
 from scripts.pentomino_env import (
     ActionStruct, render_state_b8, action_text, action_hash,
 )
+
+
+# --- Board symmetry augmentation ---
+#
+# 5x6 (non-square) has 4 symmetries: identity, 180° rot, h-flip, v-flip.
+# (90° rot would yield 6x5 which isn't our board shape.)
+# For each symmetry, transform each (piece, ori, anchor_r, anchor_c) placement
+# into the (piece, ori', anchor_r', anchor_c') that produces the symmetric cell
+# set. Piece identity is preserved — symmetries permute orientations and shift
+# anchors but never relabel pieces.
+
+SYMMETRIES = ["identity", "rot180", "vflip", "hflip"]
+
+
+def _transform_cell(r: int, c: int, h: int, w: int, sym: str) -> Tuple[int, int]:
+    if sym == "identity":
+        return r, c
+    if sym == "rot180":
+        return h - 1 - r, w - 1 - c
+    if sym == "vflip":   # top-bottom
+        return h - 1 - r, c
+    if sym == "hflip":   # left-right
+        return r, w - 1 - c
+    raise ValueError(sym)
+
+
+def _find_equivalent_placement(piece: str, ori: int, ar: int, ac: int,
+                                 h: int, w: int, sym: str
+                                 ) -> Optional[Tuple[str, int, int, int]]:
+    """Find (piece, ori', anchor_r', anchor_c') whose cells equal the symmetry-
+    transformed cells of the original placement. Returns None if no match
+    (shouldn't happen for valid placements + valid symmetries)."""
+    cells = placement_cells(piece, ori, ar, ac)
+    if cells is None:
+        return None
+    target = frozenset(_transform_cell(r, c, h, w, sym) for r, c in cells)
+    n_oris = len(PIECE_ORIENTATIONS[piece])
+    for new_ori in range(n_oris):
+        for nr in range(h):
+            for nc in range(w):
+                test = placement_cells(piece, new_ori, nr, nc)
+                if test is None:
+                    continue
+                if frozenset(test) == target:
+                    return (piece, new_ori, nr, nc)
+    return None
+
+
+def _transform_tiling(tiling: List[Tuple[str, int, int, int]],
+                       h: int, w: int, sym: str
+                       ) -> Optional[List[Tuple[str, int, int, int]]]:
+    """Apply symmetry to every placement in a tiling. Preserves placement order
+    (the model still walks the same logical sequence — just on a flipped board).
+    Returns None if any placement can't be remapped."""
+    out = []
+    for piece, ori, ar, ac in tiling:
+        eq = _find_equivalent_placement(piece, ori, ar, ac, h, w, sym)
+        if eq is None:
+            return None
+        out.append(eq)
+    return out
+
+
+def _augment_tilings(tilings: List[List[Tuple[str, int, int, int]]],
+                      h: int, w: int
+                      ) -> List[Tuple[str, List[Tuple[str, int, int, int]]]]:
+    """For each tiling, emit (sym_name, transformed_tiling) for each symmetry,
+    deduplicating tilings that map to themselves under symmetry."""
+    out = []
+    for tiling in tilings:
+        seen = set()
+        for sym in SYMMETRIES:
+            tr = _transform_tiling(tiling, h, w, sym)
+            if tr is None:
+                continue
+            key = tuple(tr)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((sym, tr))
+    return out
 
 
 SCHEMA_VERSION = "pi_theta_sft_v1"
@@ -247,6 +328,10 @@ def main():
                    help="If set, truncate train set to this size after split")
     p.add_argument("--max-val-samples", type=int, default=None,
                    help="If set, truncate val set to this size after split")
+    p.add_argument("--augment", action="store_true",
+                   help="Apply 4-fold dihedral augmentation (identity + 180° + "
+                        "v-flip + h-flip) to each tiling, deduping symmetric "
+                        "self-images. Up to 4× sample count.")
     args = p.parse_args()
 
     rng = random.Random(args.seed)
@@ -262,29 +347,43 @@ def main():
     print()
 
     print(f"Step 2: finding all tilings for each subset (cap={args.max_tilings_per_subset})...")
+    if args.augment:
+        print(f"  augmentation: ON — applying {len(SYMMETRIES)}-fold dihedral per tiling")
     all_samples = []
     n_subsets_processed = 0
     n_tilings_total = 0
+    n_augmented_tilings_total = 0
     t0 = time.perf_counter()
     for subset in valid_subsets:
         tilings = find_all_tilings(subset, args.board_h, args.board_w,
                                      args.max_tilings_per_subset)
-        for tiling_idx, tiling in enumerate(tilings):
+        if args.augment:
+            sym_tilings = _augment_tilings(tilings, args.board_h, args.board_w)
+        else:
+            sym_tilings = [("identity", t) for t in tilings]
+        for tiling_idx, (sym, tiling) in enumerate(sym_tilings):
             puzzle_id = (
                 f"pent_{args.board_h}x{args.board_w}_"
-                f"{''.join(subset)}_t{tiling_idx:03d}"
+                f"{''.join(subset)}_t{tiling_idx:03d}_{sym}"
             )
             samples = trajectory_to_samples(tiling, subset, args.board_h, args.board_w,
                                              puzzle_id)
             all_samples.extend(samples)
         n_subsets_processed += 1
         n_tilings_total += len(tilings)
+        n_augmented_tilings_total += len(sym_tilings)
         if n_subsets_processed % 5 == 0:
+            extra = (f", {n_augmented_tilings_total} after aug" if args.augment else "")
             print(f"  ...{n_subsets_processed}/{len(valid_subsets)} subsets, "
-                  f"{n_tilings_total} tilings, {len(all_samples)} samples "
+                  f"{n_tilings_total} base tilings{extra}, {len(all_samples)} samples "
                   f"({time.perf_counter()-t0:.0f}s)")
-    print(f"  done: {n_tilings_total} tilings → {len(all_samples)} (state, action) samples "
-          f"in {time.perf_counter()-t0:.0f}s")
+    if args.augment:
+        print(f"  done: {n_tilings_total} base tilings × ~{n_augmented_tilings_total/max(n_tilings_total,1):.1f} sym "
+              f"= {n_augmented_tilings_total} tilings → {len(all_samples)} samples "
+              f"in {time.perf_counter()-t0:.0f}s")
+    else:
+        print(f"  done: {n_tilings_total} tilings → {len(all_samples)} (state, action) samples "
+              f"in {time.perf_counter()-t0:.0f}s")
     print()
 
     print(f"Step 3: split train/val at puzzle level...")
