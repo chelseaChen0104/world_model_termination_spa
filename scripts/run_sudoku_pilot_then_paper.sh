@@ -29,27 +29,32 @@ PAPER_TRAIN=data/sudoku4/paper_train_balanced.jsonl
 PAPER_VAL=data/sudoku4/paper_val_natural_calibration.jsonl
 PAPER_TEST=data/sudoku4/paper_test_natural_policy.jsonl
 
-# --- background sanity check at first 50 records ---
+# --- background sanity check at first 50 records (re-usable per stage) ---
 sanity_check_at_50() {
-    local file="$1"
+    local file="$1" stage="$2"
+    local logfile="logs/sudoku_${stage}_sanity.log"
+    : > "$logfile"   # truncate any prior log for this stage
     while [ ! -f "$file" ] || [ "$(wc -l < "$file" 2>/dev/null || echo 0)" -lt 50 ]; do
         sleep 20
     done
-    echo "[$(date)] [SANITY] $file has 50+ records — running validate" \
-        | tee -a logs/sudoku_pilot_sanity.log
-    $PY scripts/validate_dataset.py "$file" 2>&1 \
-        | tee -a logs/sudoku_pilot_sanity.log
-    if grep -q "0 violations across all records" logs/sudoku_pilot_sanity.log; then
-        echo "[SANITY] PASS — 0 schema violations" | tee -a logs/sudoku_pilot_sanity.log
+    echo "[$(date)] [SANITY $stage] $file has 50+ records — running validate" \
+        | tee -a "$logfile"
+    $PY scripts/validate_dataset.py "$file" 2>&1 | tee -a "$logfile"
+    if grep -q "0 violations across all records" "$logfile"; then
+        echo "[SANITY $stage] PASS — 0 schema violations" | tee -a "$logfile"
     else
-        echo "[SANITY] FAIL — see logs/sudoku_pilot_sanity.log" | tee -a logs/sudoku_pilot_sanity.log
-        echo "[SANITY] Continuing anyway; user should inspect."
+        echo "[SANITY $stage] FAIL — see $logfile" | tee -a "$logfile"
+        echo "[SANITY $stage] Continuing anyway; user should inspect."
     fi
 }
 
-# Run sanity in background; do NOT block on it (let it finish whenever).
-sanity_check_at_50 "$PILOT_TRAIN" &
-SANITY_PID=$!
+# Pilot-stage sanity check: fires when pilot_train_balanced has 50+ records.
+sanity_check_at_50 "$PILOT_TRAIN" pilot &
+PILOT_SANITY_PID=$!
+# Paper-stage sanity check: armed now, but the file won't be created until
+# pilot completes; the polling loop in sanity_check_at_50 handles that.
+sanity_check_at_50 "$PAPER_TRAIN" paper &
+PAPER_SANITY_PID=$!
 
 # --- helper: emit one role ---
 # n_root_puzzles tuning: Sudoku averages ~2 records/puzzle (sibling_sets_per_root=3
@@ -94,10 +99,10 @@ echo "  PILOT DONE — $(date)"
 wc -l "$PILOT_TRAIN" "$PILOT_VAL" "$PILOT_TEST"
 echo "============================================================"
 
-# Wait for sanity to finish if still running.
-wait $SANITY_PID 2>/dev/null || true
+# Wait for pilot sanity to finish if still running.
+wait $PILOT_SANITY_PID 2>/dev/null || true
 echo ""
-echo "[SANITY] final state:"
+echo "[SANITY pilot] final state:"
 tail -10 logs/sudoku_pilot_sanity.log 2>/dev/null || echo "no sanity log"
 
 # --- Paper-final: 8000/1500/1500 ---
@@ -110,6 +115,12 @@ echo "============================================================"
 gen_role train_balanced 8000 "$PAPER_TRAIN" 1000 PAPER 10000
 gen_role val_natural_calibration 1500 "$PAPER_VAL" 2000 PAPER 10000
 gen_role test_natural_policy 1500 "$PAPER_TEST" 3000 PAPER 10000
+
+# Wait for paper sanity to finish if still running.
+wait $PAPER_SANITY_PID 2>/dev/null || true
+echo ""
+echo "[SANITY paper] final state:"
+tail -10 logs/sudoku_paper_sanity.log 2>/dev/null || echo "no sanity log"
 
 echo ""
 echo "============================================================"
