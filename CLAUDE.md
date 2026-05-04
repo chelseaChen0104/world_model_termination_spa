@@ -4,7 +4,14 @@
 
 ## SAVE Data Pipeline (parallel project)
 
-SAVE-related code lives under `scripts/sudoku4_*`, `scripts/pentomino_*` (board-size agnostic; current target 5×6), `scripts/hidato5x4_*`, `scripts/save_*`; output under `data/sudoku4/`, `data/pentomino5x6/`, `data/hidato5x4/`. Do not edit existing `src/environments/sudoku*.py`, `src/environments/polyomino*.py`, or `src/environments/hidato*.py` from SAVE work. Per-env specs: [data_generation_sudoku.md](doc/data_generation_sudoku.md), [data_generation_pentomino.md](doc/data_generation_pentomino.md), [data_generation_hidato.md](doc/data_generation_hidato.md). Multi-env plan + locked decisions: [plan_2026-05-03_save_data_generation.md](doc/plan_2026-05-03_save_data_generation.md).
+SAVE-related code lives under `scripts/sudoku4_*`, `scripts/pentomino_*` (board-size agnostic; current target 5×6), `scripts/hidato5x4_*`, `scripts/save_*`; output under `data/sudoku4/`, `data/pentomino5x6/`, `data/hidato5x4/`. Per-env specs: [data_generation_sudoku.md](doc/data_generation_sudoku.md), [data_generation_pentomino.md](doc/data_generation_pentomino.md), [data_generation_hidato.md](doc/data_generation_hidato.md). Multi-env plan + locked decisions: [plan_2026-05-03_save_data_generation.md](doc/plan_2026-05-03_save_data_generation.md).
+
+**Additivity rule (strict):** SAVE work must NOT modify any of the following pre-existing files because they are still used by legacy RL flows (Sudoku rl_b5, Pentomino 5×4 rl_b8, Hidato rl_b_h1):
+- `src/environments/sudoku*.py`, `src/environments/polyomino*.py`, `src/environments/hidato*.py`
+- `src/training/rl_trainer_v6.py`
+- Other `src/training/*.py` and `src/data/*.py` modules pre-dating SAVE work
+
+Need a different RL recipe (e.g., plain-action 5×6 multi-subset)? **Write a new standalone trainer under `scripts/`** (e.g., `scripts/rl_pentomino5x6_multisubset.py`), even if it duplicates ~500-700 lines of GRPO logic. Reuse via import from our additive `scripts/pentomino_env.py` etc.; never via source-modify on the shared modules.
 
 ## Project Goal
 Train an LLM to predict whether a game state is **solvable** (action-conditional: `is_solvable(s_{t+1})` after the model's chosen action), enabling early termination of hopeless episodes. **Breaking points** are derived post-hoc from a `<solvable>` time-series rather than predicted as a separate tag (v4). The primary environment is **Sudoku** (Sokoban is out of scope per [doc/spec_project.md](doc/spec_project.md) §4 — fails predictive-gap criterion).
