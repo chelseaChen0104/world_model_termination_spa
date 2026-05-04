@@ -33,24 +33,36 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-# Use the algorithmically-expanded 200-puzzle bank (locked 2026-05-04 per
-# data_generation_hidato.md §3). Falls back to the legacy 8-puzzle bank if the
-# expanded bank is missing (e.g., on a fresh machine before bank is generated).
-_EXPANDED_BANK_PATH = os.path.join(_REPO_ROOT, "data", "hidato_bank_5x4_v2")
-if os.path.isfile(os.path.join(_EXPANDED_BANK_PATH, "bank.py")):
-    _spec_path = os.path.join(_EXPANDED_BANK_PATH, "bank.py")
+# Bank loading. Default precedence: HIDATO_BANK env var > v3 (600 puzzles) >
+# v2 (200 puzzles) > legacy 8-puzzle. Toy data (May 2026) was generated with
+# v2; pilot+ uses v3. Both banks are kept on disk for reproducibility.
+def _load_bank():
     import importlib.util
-    _spec = importlib.util.spec_from_file_location("hidato_bank_5x4_v2", _spec_path)
-    _mod = importlib.util.module_from_spec(_spec)
-    _spec.loader.exec_module(_mod)
-    _BANK = _mod.PUZZLES
-    _BANK_SOURCE = "hidato_bank_5x4_v2"
-else:
+    explicit = os.environ.get("HIDATO_BANK")
+    candidates = [explicit] if explicit else ["v3", "v2"]
+    for ver in candidates:
+        if not ver:
+            continue
+        path = os.path.join(_REPO_ROOT, "data", f"hidato_bank_5x4_{ver}", "bank.py")
+        if not os.path.isfile(path):
+            continue
+        spec = importlib.util.spec_from_file_location(f"hidato_bank_5x4_{ver}", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.PUZZLES, f"hidato_bank_5x4_{ver}"
+    # legacy fallback
     from src.environments.hidato_puzzle_bank import PUZZLES as _BANK
-    _BANK_SOURCE = "legacy_8_puzzle"
+    return _BANK, "legacy_8_puzzle"
 
 
-ENV_VERSION = f"hidato5x4_env_v2_200puzzles" if _BANK_SOURCE == "hidato_bank_5x4_v2" else "hidato5x4_env_v1_8puzzles"
+_BANK, _BANK_SOURCE = _load_bank()
+_BANK_SIZE = len(_BANK)
+if _BANK_SOURCE == "legacy_8_puzzle":
+    ENV_VERSION = "hidato5x4_env_v1_8puzzles"
+else:
+    # _BANK_SOURCE is "hidato_bank_5x4_<ver>" — extract <ver>
+    _ver = _BANK_SOURCE.rsplit("_", 1)[-1]
+    ENV_VERSION = f"hidato5x4_env_{_ver}_{_BANK_SIZE}puzzles"
 TEXT_VERSION = "hidato_text_v1"
 
 

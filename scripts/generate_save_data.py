@@ -30,7 +30,6 @@ import json
 import math
 import os
 import random
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -40,11 +39,37 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+
+def _resolve_git_commit() -> str:
+    """Cached at module import; called once instead of per-record. Reads
+    .git/HEAD directly to avoid spawning a `git` subprocess that fails
+    noisily on cloud machines that aren't a git checkout."""
+    try:
+        head_path = os.path.join(_REPO_ROOT, ".git", "HEAD")
+        if not os.path.isfile(head_path):
+            return "unknown"
+        with open(head_path) as f:
+            head = f.read().strip()
+        if head.startswith("ref: "):
+            ref_path = os.path.join(_REPO_ROOT, ".git", head[5:])
+            if os.path.isfile(ref_path):
+                with open(ref_path) as f:
+                    return f.read().strip()
+            return "unknown"
+        return head  # detached HEAD: it's already a SHA
+    except Exception:
+        return "unknown"
+
+
+_GIT_COMMIT = _resolve_git_commit()
+
+
 import torch
 
 from scripts.save_schema import SiblingSetRecord
 from scripts.policy_sampler import (
-    load_model, build_chat_prompt, batched_sample, policy_eval_logprob, Sample,
+    load_model, build_chat_prompt, batched_sample,
+    policy_eval_logprob, batched_policy_eval_logprob, Sample,
 )
 
 
@@ -606,22 +631,17 @@ def _build_candidate(
         candidate_class = _classify_candidate(parse_valid, local_valid, False, False)
 
     # policy_eval_logprob: ALWAYS computed for every candidate (spec §4.2).
-    # For sol/prt, we synthesize a response_text from action_text + minimal XML.
-    # For lt/ht, we use the raw LLM response if available.
+    # We compute eval_response here but DEFER the logprob call so that all K
+    # responses for a sibling set can be batched in one forward pass (see
+    # generate_one_sibling_set). _eval_response is a private hand-off field
+    # consumed there and stripped before the candidate is finalized.
     if raw_response is not None and raw_response.strip():
         eval_response = raw_response
     elif action_text:
-        # Synthesize a minimal response: just the <answer> tag (matches what
-        # the policy would produce at lowest cost). The logprob will be
-        # under-counted vs the policy's preferred verbose form, but consistent
-        # across all candidates.
         eval_response = f"<answer>{action_text}</answer>"
     else:
         eval_response = ""
-    if eval_response:
-        eval_lp = policy_eval_logprob(model, tokenizer, eval_prompt, eval_response)
-    else:
-        eval_lp = float("nan")
+    eval_lp = float("nan")  # filled in by batched call later
 
     return {
         "candidate_id": f"c{cand_idx:03d}",
@@ -632,6 +652,7 @@ def _build_candidate(
         "action_text": action_text,
         "action_text_canonical": action_canonical,
         "action_struct": _action_to_struct_dict(action_struct, adapter),
+        "_eval_response": eval_response,  # private; stripped by caller after batched logprob
         "logprobs": {
             "generation_logprob": generation_logprob,
             "policy_eval_logprob": eval_lp,
@@ -840,6 +861,16 @@ def generate_one_sibling_set(
         )
         candidates.append(cand)
 
+    # 4.5) Batched policy_eval_logprob across all candidates (spec §4.2).
+    # Replaces N sequential forward passes with 1 batched forward pass.
+    eval_responses = [c.pop("_eval_response", "") for c in candidates]
+    if any(eval_responses):
+        lps = batched_policy_eval_logprob(model, tokenizer, chat_prompt, eval_responses)
+    else:
+        lps = [float("nan")] * len(candidates)
+    for c, resp, lp in zip(candidates, eval_responses, lps):
+        c["logprobs"]["policy_eval_logprob"] = lp if resp else float("nan")
+
     # 5) Aggregate stats
     set_stats = _set_stats(candidates)
     deceptive_pairs = _mine_deceptive_pairs(candidates)
@@ -861,12 +892,8 @@ def generate_one_sibling_set(
         "action_space_stats": action_space_stats,
     }
 
-    # 7) Provenance
-    try:
-        git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"],
-                                              cwd=_REPO_ROOT, text=True).strip()
-    except Exception:
-        git_commit = "unknown"
+    # 7) Provenance — git commit was cached at module import (see _GIT_COMMIT below)
+    git_commit = _GIT_COMMIT
 
     record = {
         "schema": "save_sibling_set_v1.2",

@@ -201,6 +201,81 @@ def policy_eval_logprob(
     return total_logprob
 
 
+def batched_policy_eval_logprob(
+    model,
+    tokenizer,
+    prompt: str,
+    response_texts: list,
+) -> list:
+    """Vectorized policy_eval_logprob: compute log π_θ(response_i | prompt) for
+    a list of N response strings sharing the same prompt, in ONE forward pass.
+
+    Returns: list of N floats (matching response_texts order).
+
+    Numerically equivalent to calling policy_eval_logprob() N times: uses
+    default tokenizer settings (add_special_tokens=True) so the prompt-token
+    boundary matches per-call computation. Empty response → 0.0.
+    """
+    if not response_texts:
+        return []
+    device = next(model.parameters()).device
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id
+
+    # Tokenize the prompt standalone (matches policy_eval_logprob's prompt_len).
+    prompt_len = tokenizer(prompt, return_tensors="pt").input_ids.shape[1]
+
+    # Per-row tokenization of (prompt + response). Default add_special_tokens=True.
+    full_ids_list = []
+    full_lens = []
+    for resp in response_texts:
+        if not resp:
+            full_ids_list.append(None)  # marker for empty
+            full_lens.append(prompt_len)
+        else:
+            ids = tokenizer(prompt + resp)["input_ids"]
+            full_ids_list.append(ids)
+            full_lens.append(len(ids))
+
+    max_len = max(full_lens)
+    if max_len == 0:
+        return [0.0] * len(response_texts)
+
+    # Pad to a single batch tensor.
+    batch_ids = []
+    attn_masks = []
+    for ids in full_ids_list:
+        if ids is None:
+            ids = [pad_id]  # length=1 placeholder; will hit empty-response branch below
+        pad = max_len - len(ids)
+        batch_ids.append(ids + [pad_id] * pad)
+        attn_masks.append([1] * len(ids) + [0] * pad)
+    batch_ids_t = torch.tensor(batch_ids, dtype=torch.long, device=device)
+    attn_t = torch.tensor(attn_masks, dtype=torch.long, device=device)
+
+    with torch.no_grad():
+        out = model(input_ids=batch_ids_t, attention_mask=attn_t)
+    logits = out.logits.float()  # [B, T, V]
+    log_probs = F.log_softmax(logits, dim=-1)
+
+    # Vectorized gather of per-row response token logprobs.
+    # For row i: sum log_probs[i, j-1, ids[j]] for j in [prompt_len, full_len).
+    results = []
+    for i, (ids, flen) in enumerate(zip(full_ids_list, full_lens)):
+        if ids is None or flen <= prompt_len:
+            results.append(0.0)
+            continue
+        # Position indices: [prompt_len-1, prompt_len, ..., flen-2]
+        positions = torch.arange(prompt_len - 1, flen - 1, device=device)
+        # Token ids at the predicted positions: [ids[prompt_len], ..., ids[flen-1]]
+        target_ids = torch.tensor(ids[prompt_len:flen], dtype=torch.long, device=device)
+        row_lp = log_probs[i].index_select(0, positions)  # [N_resp, V]
+        gathered = row_lp.gather(1, target_ids.unsqueeze(1)).squeeze(1)  # [N_resp]
+        results.append(gathered.sum().item())
+    return results
+
+
 # --- Smoke / self-test (requires a real checkpoint) ---
 
 if __name__ == "__main__":
