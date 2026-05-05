@@ -18,10 +18,15 @@ PY=/root/miniconda3/bin/python
 
 export HF_HOME=/root/autodl-tmp/cache/huggingface
 export HF_ENDPOINT=https://hf-mirror.com
-# Pre-placed-piece variant ON (per data_generation_pentomino.md "Decision
-# 2026-05-04: use (a) only for now"). Adds anchor diversity without changing
-# state coverage.
-export PENT_PRE_PLACE=1
+# Pre-placed-piece variant disabled (PENT_PRE_PLACE=0) per 2026-05-05
+# diagnosis: with pre-place=1, trajectories are only 5 steps and we
+# emit records only from t=0,1,2 (the script skips last 2 steps). The
+# 5×6 search tree is wide enough at those early steps that mixed_rate
+# was ~3% (target 60%). Disabling pre-place gives full 6-step
+# trajectories so t=3 (mid-game with 2 pieces remaining) gets sampled
+# — that's where the constraint actually bites and doomed candidates
+# become more available.
+export PENT_PRE_PLACE=0
 
 cd "$REPO"
 mkdir -p logs data/pentomino5x6
