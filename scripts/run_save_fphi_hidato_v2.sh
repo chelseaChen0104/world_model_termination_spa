@@ -17,21 +17,37 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
 cd "$REPO"
+mkdir -p logs data/hidato5x4/sft_pilot
 
-mkdir -p logs
+# 2026-05-05 update: retrain on PILOT data (3000/1000/1000) instead of toy
+# (1500/346/345). Materialize per-candidate .sft.jsonl files first via
+# save_sft_prepare.py, then train.
+RAW_TRAIN=$REPO/data/hidato5x4/pilot_train_balanced.jsonl
+RAW_VAL=$REPO/data/hidato5x4/pilot_val_natural_calibration.jsonl
+RAW_TEST=$REPO/data/hidato5x4/pilot_test_natural_policy.jsonl
 
-# .sft.jsonl files were materialized by the v1 run; reuse them.
-SFT_TRAIN=$REPO/data/hidato5x4/sft/train.sft.jsonl
-SFT_VAL=$REPO/data/hidato5x4/sft/val.sft.jsonl
+SFT_TRAIN=$REPO/data/hidato5x4/sft_pilot/train.sft.jsonl
+SFT_VAL=$REPO/data/hidato5x4/sft_pilot/val.sft.jsonl
+SFT_TEST=$REPO/data/hidato5x4/sft_pilot/test.sft.jsonl
 
 OUT=/tmp/save_fphi_hidato5x4_v2
 
-echo "=== SAVE f_phi v2 (token-weighted CE) — Hidato 5x4 ==="
+echo "=== SAVE f_phi v2 (token-weighted CE, PILOT data) — Hidato 5x4 ==="
 echo "  $(date)"
+echo ""
+
+# Step 1: materialize per-candidate SFT samples from pilot raw JSONL
+echo "--- Step 1: materializing pilot .sft.jsonl files ---"
+$PY scripts/save_sft_prepare.py --input "$RAW_TRAIN" --output "$SFT_TRAIN"
+$PY scripts/save_sft_prepare.py --input "$RAW_VAL"   --output "$SFT_VAL"
+$PY scripts/save_sft_prepare.py --input "$RAW_TEST"  --output "$SFT_TEST"
+echo ""
+
+# Step 2: train v2 (token-weighted CE)
+echo "--- Step 2: training v2 ---"
 echo "  train: $SFT_TRAIN"
 echo "  val:   $SFT_VAL"
 echo "  out:   $OUT"
-echo ""
 
 $PY scripts/train_save_fphi_v2.py \
     --train  "$SFT_TRAIN" \
